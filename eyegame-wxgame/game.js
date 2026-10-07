@@ -9,6 +9,21 @@
 // 「可玩」优先：能在真机上跑起来，转头能控制飞船、世界在流动、有速度感。
 // 手感参数（死区/EMA/外推）都是初值，真机试完再调。
 //
+// ── v5（2026-10-07）：玩法纵深 + 视听反馈 + 暂停 ────────────────
+//   ① ★ P0 能量块：块刻意**偏离中线**（见 ORB_PATTERNS），把原本"永远贴中线
+//      最优"的无脑追球，变成"要不要冒险去够两侧"的真取舍。居中加成同步
+//      从 14 压到 5（CFG.ROOM_SCORE）——两个目标不能互相打架，否则玩家会
+//      理性地选择忽略能量块。
+//      ★ 这是「游戏收益 ↔ 颈椎运动量」第一次真正对齐：不靠文案劝人动脖子，
+//        分数自己会驱动。结算里的"平均离中线 X%"就是这条对齐的量化。
+//   ② P2 视听反馈：音效**全部现场合成**（WebAudio，零素材 —— 整包才 30 多 KB，
+//      塞 mp3 直接翻几倍）；粒子池 + 分数滚动 + 吃块脉冲。
+//      语汇纪律：奖励 = 亮度 + 上扬音；惩罚 = 抖动 + 红屏 + 下滑音。两套不混用。
+//   ③ 暂停 / 主动结束：顶栏正中 ⏸。世界冻结、但姿态链路保持热（恢复无空窗）；
+//      恢复时把绝对时间戳整体平移 —— 否则暂停 30 秒回来，无敌时间和 Boost
+//      冷却都被"偷走"了。
+//      ★ 这也是对「颈椎舒缓」定位的交代：脖子累了可以停，而不是只能玩到扣光血。
+//
 // ── 核心设计 ──────────────────────────────────────────────────
 //   · 纵轴卷轴：飞船在 y=0.78H，世界迎面涌来（伪 3D，尺寸 ∝ 1/z）
 //   · ★★ 主控轴 = **歪头（roll）**，不是转头（用户 2026-10-07 二次修正）：
@@ -18,9 +33,17 @@
 //        roll σ ≈ 0.074 rad（≈4.2°）        → 噪声大，**这正是上一版把 roll
 //        降级成"仅装饰"的原因**。所以要它做主控，滤波必须做厚：
 //        死区 3°→4°、EMA τ 0.09s→0.20s、外推 0.55→0.40。
-//     ⚠️ 符号仍未实测：`CFG.ROLL_SIGN` 一处收口；真机若左右反了，
-//        点「控制」按钮切到「歪头·位置反」档（同一个 sign 取负），
-//        或直接把常量翻过来。
+//     ⚠️ 符号：`CFG.ROLL_SIGN` 一处收口。v4 按真机反馈「飞船方向要和头部方向一致」
+//        翻正为 +1（头向右肩歪 → 飞船右移）；若又反了，切「控制:位置反」档即可。
+//   · ★★ v4 新增「幅度」档（2026-10-07，用户反馈「对头部动作过于敏感、
+//     需要增大动作幅度让颈部得到更多运动」）：
+//     修法 = **把满量程角度拉开**，而不是单纯砍增益 ——
+//       · 满量程 20° → 30°（标准档）：小角度输出成比例变小（不敏感），
+//         到满舵所需动作量变大（颈部真的要多动）
+//       · 三档只改"动作量"，**不改最大机动能力**（XRANGE/VMAX 恒定）
+//       · 外推 0.40 → 0.30，减少"提前窜出去"的手感
+//       · 颈椎记账阈值随之抬高（7.5° → 11.5°）：要真歪到位才算一次
+//     档位：紧凑(3°/20°) · 标准(4°/30°) · 舒展(5°/40°)，底部第 2 个按钮切换
 //   · 符号约定（两个轴统一）：**轴值 > 0 ⟺ 飞船向右移**。
 //     所以"头向左肩歪 / 向左转头"必须映射成**负**轴值。
 //   · ★ 玩法 = **穿越隧道**（用户 2026-10-07 修正，替代原「5 泳道躲障碍」）：
@@ -70,7 +93,9 @@ const C = {
   lane: '#1b2545',
   fg: '#e6ecff', dim: '#7f8fc4',
   ok: '#4ade80', bad: '#ff6b6b', warn: '#fbbf24', accent: '#7aa2ff',
-  panel: '#0f1630', line: '#243060'
+  panel: '#0f1630', line: '#243060',
+  // 能量块：青色系，与隧道蓝（#8fb8ff）和 Boost 金（#ffd98a）明确区分 —— 三种颜色三种含义
+  orb: '#5ef0d8', orbGlow: '#2bd4c0', orbCore: '#eafffb'
 }
 
 // ---------------------------------------------------------------- 配置
@@ -79,7 +104,7 @@ const CFG = {
   HORIZON_R: 0.22,        // 地平线位置（占屏高）
   SHIP_Y_R: 0.78,         // 飞船位置（占屏高）
   SHIP_Z: 8,              // 飞船纵深（世界单位）
-  Z_FAR: 30,              // 隧道采样最远纵深
+  Z_FAR: 36,              // 隧道采样最远纵深（v5：30→36，为能量块留出足够预见时间）
   Z_NEAR: 6.0,            // 隧道最近采样纵深（在飞船平面之下，属正常）
 
   SHIP_HW: 0.10,          // 飞船半宽（世界单位）
@@ -96,17 +121,18 @@ const CFG = {
   TUN_BACK: 24,           // 飞船身后保留纵深
   TUN_FWD: 64,            // 飞船身前生成纵深
 
-  // ---- 控制（2026-10-08：主控轴改为「歪头 roll」）----
+  // ---- 控制（2026-10-07：主控轴改为「歪头 roll」）----
   // 两个轴信噪比差别很大，参数必须分开写，不能共用：
   //   yaw  σ ≈ 0.013~0.026 rad（<1.5°）→ 干净，小死区 + 快 EMA
   //   roll σ ≈ 0.074 rad（≈4.2°）      → 噪声大 3~5 倍，大死区 + 慢 EMA
   CTRL_IDX: 0,            // 控制模式索引（见 CTRL_MODES）：0=歪头·位置
-  ROLL_SIGN: -1,          // ★ 头向左肩歪 → 飞船左移（真机若反：切「歪头·位置反」档，或直接翻这里）
-  ROLL_DEAD: 0.070,       // roll 死区 4°（必须比 yaw 的 3° 大，否则噪声穿透）
-  ROLL_FULL: 0.349,       // roll 满量程 20°（达到最大横向输出）
+  RANGE_IDX: 1,           // ★【幅度】档索引（见 RANGES）：0=紧凑 1=标准 2=舒展
+  ROLL_SIGN: +1,          // ★ 头向右肩歪 → 飞船右移（v4 按真机反馈翻正；若又反了切「歪头·位置反」）
+  ROLL_DEAD: 0.070,       // （基准值，实际由 RANGES 覆盖）
+  ROLL_FULL: 0.524,       // （基准值，实际由 RANGES 覆盖）满量程 30°
   ROLL_TAU: 0.20,         // roll EMA 时间常数(s)：噪声大 → 比 yaw 平滑一倍以上
-  ROLL_EXTRAP: 0.40,      // roll 速率外推权重（比 yaw 保守，避免把噪声一起放大）
-  ROLL_XRANGE: 1.15,      // 位置律：满倾角 → 世界横向 ±1.15
+  ROLL_EXTRAP: 0.30,      // roll 速率外推权重（v4：0.40→0.30，减少"提前窜出去"的手感）
+  ROLL_XRANGE: 1.15,      // 位置律：满倾角 → 世界横向 ±1.15（三档恒定，保证最大机动能力不变）
   ROLL_VMAX: 5.5,         // 速度律：满倾角 → 横向速度（世界单位/s）
   TILT_K: 0.55,           // 机身随歪头压倾幅度（纯视觉；与操作同向 = 代入感）
 
@@ -121,10 +147,10 @@ const CFG = {
   EXTRAP: 0.55,           // （旧字段，保留兼容）
   ROLL_K: 0.30,           // （旧字段，保留兼容）
 
-  // 颈椎记账阈值（跟随当前主控轴）
-  NECK_TH_ROLL: 0.13,     // 歪头计数阈值 ≈7.5°
+  // 颈椎记账阈值（跟随主控轴 + 跟随「幅度」档，见 RANGES）
+  NECK_TH_ROLL: 0.20,     // （基准）歪头计数阈值 ≈11.5°
   NECK_TH_YAW: 0.17,      // 转头计数阈值 ≈10°
-  NECK_CALM: 0.09,        // 零点慢速校正的"静息带"（带内输出本来就是 0）
+  NECK_CALM: 0.091,       // （基准）零点慢速校正的"静息带"（≈死区×1.3，带内输出本来就是 0）
 
   PITCH_BOOST: 0.14,      // |pitch| > 8° 触发 Boost（方向待真机确认，先用绝对值）
   BOOST_MAX_MS: 3000,
@@ -143,6 +169,34 @@ const CFG = {
   RAMP_SEC: 55,
   GAP_START: 0.95,        // 波间隔（秒）
   GAP_END: 0.50,
+
+  // ---- ★ P0 能量块（2026-10-07）------------------------------------
+  // 目的：给「贴中线」以外第二个选项 —— 想拿分就得离开中线去够两侧。
+  // 这样**游戏收益第一次和颈椎运动量对齐**：不用靠文案劝人动脖子，分数自然会驱动。
+  // ⚠️ 与「居中加成」是竞争关系，所以居中分从 14 压到 5（见 ROOM_SCORE）。
+  ORB_ON: true,
+  ORB_GAP_SEC: 0.52,      // ★ 相邻块的**时间**间隔（秒）—— 按时间不按距离：
+  ORB_GAP_JIT: 0.34,      //   速度从 9 爬到 20，若按固定距离，节奏会快一倍。
+                        //   0.52s 的由来：视野纵深 40 世界单位 / 速度 9.6 ≈ 4.2 秒，
+                        //   而一串 4 块 = 4×0.52 = 2.1 秒 → 视野里正好两串。
+                        //   （旧值 1.05 时一串就占满视野，屏幕上只剩孤零零一个块）
+  ORB_R: 0.075,           // 块半径（世界单位，纯视觉+判定）
+  ORB_VIEW: 28,           // ★ 相对飞船平面的可见纵深（= Z_FAR 36 − SHIP_Z 8）
+                        //   ★★ 生成上限必须与它对齐：早先用 TUN_FWD(64) 当生成上限，
+                        //   新串会生成在视野外 19 单位处，第一次 updateOrbs 裁剪就把它们
+                        //   删了 —— scroll 追上时那块早没了，屏幕上周期性"断流"。
+                        //   冒烟 O15b（空窗帧占比）抓到的就是这个。
+  ORB_OFF_MIN: 0.50,      // 相对隧道半宽的**最小**偏移比例 ← 保证「中线附近没有块」
+  ORB_OFF_MAX: 0.85,      // 最大偏移（0.85×hw + ORB_R 仍 < hw，块不穿出管壁）
+  ORB_CATCH: 0.045,       // 横向判定富余（对玩家友好；0 = 严格贴合）
+  ORB_SCORE: 30,          // 基础分（再乘 combo 倍率）
+  COMBO_SEC: 2.6,         // 连击保持时间：超时未吃到就归零
+  COMBO_CAP: 9,           // 连击倍率上限
+  ROOM_SCORE: 5,          // 居中保底分（原 14 → 5：能量块才是主收益，居中只保底）
+
+  // ---- P2 视听反馈 ----
+  AUDIO_ON: true,
+  P_MAX: 140,             // 粒子池上限（超出就丢最老的，避免长局内存爬升）
 }
 
 let L = {}   // 布局缓存（resize 与 render 共用）
@@ -163,10 +217,11 @@ resize()   // 首次布局：必须放在 let L 的声明之后，否则 TDZ 报
 
 // ---------------------------------------------------------------- 状态
 const S = {
-  mode: 'boot',           // boot | play | over
+  mode: 'boot',           // boot | play | paused | over
   srcKind: 'auto',        // auto | visionkit | gyro | touch
   srcActive: 'none',      // 实际生效：visionkit | gyro | touch
   err: '', msg: '',
+  audio: 'unknown',       // unknown | on | off（WebAudio 可用性，见 initAudio）
 
   // 摄像头 / 姿态链路
   hasCam: typeof wx.createCamera === 'function',
@@ -208,11 +263,25 @@ const S = {
     invulnUntil: 0, dead: false,
     t: 0,                       // 本局时间（秒）
     speed: CFG.SPEED_MIN,
-    tunnel: { pts: [], dir: 0, dirTgt: 0, scroll: 0 },
+    tunnel: { pts: [], dir: 0, dirTgt: 0, scroll: 0, nextOrbZ: 0, queue: [] },
     stars: [], streaks: [],
     shake: 0, flash: 0, hitFlash: 0,
     boostUntil: 0, boostCoolAt: 0, boosting: false,
-    hits: 0, cent: 1, centSum: 0, centN: 0
+    hits: 0, cent: 1, centSum: 0, centN: 0,
+
+    // ★ P0 能量块
+    orbs: [],                 // 视野内的块（世界坐标）
+    parts: [],                // 粒子池
+    combo: 0, comboT: 0,      // 连击数 / 剩余保持时间(s)
+    comboPop: 0,              // 吃到块时的弹出动画进度 1→0
+    comboPopTxt: '',          // 弹出文字（含分数）
+    orbFlash: 0,              // 吃块屏幕脉冲（呼吸感，不是震屏）
+    took: 0, miss: 0,         // 本局吃到 / 错过（错过不清连击，见 updateOrbs）
+    offSum: 0, offN: 0,       // 吃到块的 |off| 累加 → 结算显示"平均离中线 X%"
+    scoreShow: 0,             // 显示用分数（缓动追 g.score，制造"跳动"感）
+
+    // 暂停
+    pausedAt: 0, endedByUser: false
   },
 
   // 颈椎记账
@@ -221,14 +290,28 @@ const S = {
   // 控制模式索引（0=歪头·位置 1=歪头·位置反 2=歪头·速度 3=转头·位置）
   ctrlIdx: 0,
 
+  // 幅度档索引（0=紧凑 1=标准 2=舒展）
+  rangeIdx: 1,
+
   // 调试
   perf: { renderStamps: [], renderFps: 0 },
-  btn: { y: 0, h: 0, x: 0, w: 0, xs: [] },
+  // 按钮命中区：btn = 底部四按钮；pause = 顶部暂停；pui = 暂停层两按钮；aSW = 音效开关
+  btn: { y: 0, h: 0, x: 0, w: 0, xs: [], pause: null, pui: null, aSW: null },
 }
 
 try { S.g.best = wx.getStorageSync('bd_best') || 0 } catch (e) { S.g.best = 0 }
 try { S.ctrlIdx = wx.getStorageSync('bd_ctrl') || 0 } catch (e) { S.ctrlIdx = 0 }
 if (!(S.ctrlIdx >= 0 && S.ctrlIdx < 4)) S.ctrlIdx = 0
+// ⚠️ 首次读 storage 返回 ''（parseInt→NaN），必须显式回落到默认 1（标准档）
+try {
+  const rv = parseInt(wx.getStorageSync('bd_range'), 10)
+  S.rangeIdx = (rv >= 0 && rv <= 2) ? rv : 1
+} catch (e) { S.rangeIdx = 1 }
+// 音效开关（暂停层里可切）：首次读是 ''，只有显式存过 0/1 才覆盖默认
+try {
+  const av = wx.getStorageSync('bd_audio')
+  if (av === 0 || av === 1 || av === '0' || av === '1') CFG.AUDIO_ON = !!parseInt(av, 10)
+} catch (e) { /* 用默认 */ }
 
 let camObj = null
 let workerObj = null
@@ -237,6 +320,61 @@ function msgOf(e) { return (e && e.message) ? e.message : String(e) }
 function clamp(v, a, b) { return v < a ? a : (v > b ? b : v) }
 function lerp(a, b, t) { return a + (b - a) * t }
 function rnd(a, b) { return a + Math.random() * (b - a) }
+
+// ---------------------------------------------------------------- 音效（P2）
+// ★ 零素材方案：不加载任何音频文件，用 WebAudio 现场合成。
+//   理由：① 小游戏包体敏感（现在整包才 33KB，塞 mp3 直接翻几倍）；
+//        ② 合成音能跟着 combo 变调 —— 音高随连击上升，正反馈强度是"听得见"的。
+//   降级：基础库 <2.19 / 接口缺失 / 用户关掉 → S.audio='off'，全程静默，玩法不受影响。
+//   ⚠️ iOS 上 WebAudio 需要用户手势后才能出声 → 首次触摸时 resume()（见 onTouchStart）。
+let AC = null
+function initAudio() {
+  if (AC !== null) {
+    // 已创建：补一次 resume（iOS 首帧常是 suspended，等用户手势）
+    try { if (AC && AC.state === 'suspended' && AC.resume) AC.resume() } catch (e) { /* ignore */ }
+    return AC
+  }
+  if (!CFG.AUDIO_ON) { AC = false; S.audio = 'off'; return AC }
+  try {
+    if (typeof wx.createWebAudioContext !== 'function') throw new Error('no WebAudio')
+    AC = wx.createWebAudioContext()
+    if (!AC || !AC.destination) throw new Error('bad ctx')
+    if (AC.state === 'suspended' && AC.resume) AC.resume()
+    S.audio = 'on'
+  } catch (e) { AC = false; S.audio = 'off' }
+  return AC
+}
+
+// 一个带包络的振荡器音符。sweepTo = 频率滑到哪（做"下滑/上扫"的听感）
+function tone(freq, dur, type, vol, sweepTo, at) {
+  if (!CFG.AUDIO_ON) return
+  const ac = initAudio()
+  if (!ac) return
+  try {
+    const t0 = ac.currentTime + (at || 0)
+    const o = ac.createOscillator()
+    const gn = ac.createGain()
+    o.type = type || 'sine'
+    o.frequency.setValueAtTime(freq, t0)
+    if (sweepTo) o.frequency.exponentialRampToValueAtTime(Math.max(20, sweepTo), t0 + dur)
+    // 8ms 起音 + 指数收尾：不做硬切，否则每次都有"啪"的爆音
+    gn.gain.setValueAtTime(0.0001, t0)
+    gn.gain.exponentialRampToValueAtTime(vol, t0 + 0.008)
+    gn.gain.exponentialRampToValueAtTime(0.0001, t0 + dur)
+    o.connect(gn); gn.connect(ac.destination)
+    o.start(t0); o.stop(t0 + dur + 0.03)
+  } catch (e) { /* 单次失败不致命 */ }
+}
+
+// 语义化封装：调用点读起来就是"发生了什么"，不关心波形
+function sfxOrb(combo) {
+  const c = Math.min(combo, CFG.COMBO_CAP)
+  tone(520 + c * 55, 0.085, 'triangle', 0.16, 900 + c * 60)
+}
+function sfxHit() { tone(190, 0.22, 'sawtooth', 0.20, 65) }
+function sfxBoost() { tone(280, 0.30, 'sawtooth', 0.10, 1000) }
+function sfxStart() { tone(440, 0.10, 'triangle', 0.13); tone(660, 0.16, 'triangle', 0.11, 660, 0.09) }
+function sfxOver() { tone(420, 0.28, 'triangle', 0.15, 170) }
 
 // ---------------------------------------------------------------- 投影
 function project(wx, wz) {
@@ -515,7 +653,7 @@ function switchSource() {
 }
 
 // ---------------------------------------------------------------- 控制器
-// ★ 2026-10-08：主控轴从「转头(yaw)」改为「歪头(roll)」。
+// ★ 2026-10-07：主控轴从「转头(yaw)」改为「歪头(roll)」。
 //   为什么：用户反馈"头向左右肩歪"比"左右转头"对脖子更舒服 —— 这是产品定位
 //   层面的判断（转头主要动用颈旋转肌群、持续单侧旋转易累；向肩歪是颈侧屈，
 //   动作幅度小、前庭刺激弱，更放松），我认同。
@@ -535,11 +673,26 @@ function switchSource() {
 //   所以"头向左肩歪 / 向左转头"必须映射成负轴值 —— 由 SIGN 常量一处收口。
 const ctl = { f: 0, prev: 0, vel: 0, smooth: 0 }
 
+// ---------------------------------------------------------------- 幅度档
+// 用户反馈「对头部动作过于敏感」（2026-10-07）：小幅歪头就吃满舵，脖子几乎不用动。
+// 修法 = **把满量程角度拉开**（而不是单纯砍增益）：
+//   死区/满量程一起抬 → 小角度输出成比例变小（更不敏感），
+//   同时"到满舵所需的动作量"变大 → **颈部活动量随之增加**，正中产品诉求。
+// 三档**只改动作量，不改最大机动能力**：xrange / vmax 恒定 1.15 / 5.5，
+// 所以切档不会让你"够不着弯道"，只会让你"多动脖子"。
+//   neck = 颈椎记账阈值（要真歪到位才计一次）；calm = 零点校正静息带（≈死区×1.3）
+const RANGES = [
+  { id: 'tight', dead: 0.052, full: 0.349, neck: 0.14, calm: 0.068, label: '紧凑' }, // 3° / 20°（原手感）
+  { id: 'std',   dead: 0.070, full: 0.524, neck: 0.20, calm: 0.091, label: '标准' }, // 4° / 30° ★默认
+  { id: 'wide',  dead: 0.087, full: 0.698, neck: 0.26, calm: 0.113, label: '舒展' }  // 5° / 40°（颈部大幅运动）
+]
+function curRange() { return RANGES[clamp(S.rangeIdx | 0, 0, RANGES.length - 1)] }
+
 const CTRL_MODES = [
-  { id: 'roll-pos',   axis: 'roll', law: 'pos', flip: 1,  label: '歪头·位置' },
-  { id: 'roll-pos-r', axis: 'roll', law: 'pos', flip: -1, label: '歪头·位置反' },
-  { id: 'roll-vel',   axis: 'roll', law: 'vel', flip: 1,  label: '歪头·速度' },
-  { id: 'yaw-pos',    axis: 'yaw',  law: 'pos', flip: 1,  label: '转头·位置' }
+  { id: 'roll-pos',   axis: 'roll', law: 'pos', flip: 1,  label: '歪头·位置',   short: '位置' },
+  { id: 'roll-pos-r', axis: 'roll', law: 'pos', flip: -1, label: '歪头·位置反', short: '位置反' },
+  { id: 'roll-vel',   axis: 'roll', law: 'vel', flip: 1,  label: '歪头·速度',   short: '速度' },
+  { id: 'yaw-pos',    axis: 'yaw',  law: 'pos', flip: 1,  label: '转头·位置',   short: '转头' }
 ]
 function ctrlMode() { return CTRL_MODES[clamp(S.ctrlIdx | 0, 0, CTRL_MODES.length - 1)] }
 function axisSign(axis) { return axis === 'roll' ? CFG.ROLL_SIGN : CFG.YAW_SIGN }
@@ -562,8 +715,9 @@ function updateControl(dt) {
   const base = isRoll ? (p.roll - p.nRoll) : (p.yaw - p.nYaw)
   const raw = base * axisSign(m.axis) * m.flip
 
-  const dead = isRoll ? CFG.ROLL_DEAD : CFG.YAW_DEAD
-  const full = isRoll ? CFG.ROLL_FULL : CFG.YAW_FULL
+  const rg = curRange()
+  const dead = isRoll ? rg.dead : CFG.YAW_DEAD
+  const full = isRoll ? rg.full : CFG.YAW_FULL
   const tau = isRoll ? CFG.ROLL_TAU : CFG.YAW_TAU
   const expK = isRoll ? CFG.ROLL_EXTRAP : CFG.YAW_EXTRAP
 
@@ -604,7 +758,7 @@ function updateControl(dt) {
   // ---- 零点慢速校正 ----
   // 仅在"静息带"内极慢跟随：带内输出本来就是 0，所以**改了也不影响当前操作**，
   // 只用来吃掉 VisionKit 的慢漂移（否则歪头做主控会像"船慢慢自己跑"）。
-  if (!stale && isRoll && Math.abs(base) < CFG.NECK_CALM) {
+  if (!stale && isRoll && Math.abs(base) < rg.calm) {
     p.nRoll += (p.roll - p.nRoll) * Math.min(1, dt * 0.10)
   }
 
@@ -625,7 +779,7 @@ function trackNeck() {
   const isRoll = m.axis === 'roll'
   const base = isRoll ? (S.pose.roll - S.pose.nRoll) : (S.pose.yaw - S.pose.nYaw)
   const v = base * axisSign(m.axis)
-  const th = isRoll ? CFG.NECK_TH_ROLL : CFG.NECK_TH_YAW
+  const th = isRoll ? curRange().neck : CFG.NECK_TH_YAW
   const nk = S.neck
   if (nk.side === 1 && v < th * 0.5) nk.side = 0
   else if (nk.side === -1 && v > -th * 0.5) nk.side = 0
@@ -650,6 +804,7 @@ function updateBoost(dt) {
   } else if (over && now > g.boostCoolAt) {
     g.boosting = true
     g.boostUntil = now + CFG.BOOST_MAX_MS
+    sfxBoost()
   }
 }
 
@@ -696,6 +851,8 @@ function initTunnel() {
   // 开局先给一段平直段（别一上来就拐）；飞船 zt = SHIP_Z 正处在其中
   for (let i = 0; i <= 4; i++) t.pts.push({ zt: i * CFG.TUN_STEP, cx: 0, hw: hw0 })
   while (t.pts[t.pts.length - 1].zt < CFG.SHIP_Z + CFG.TUN_FWD) pushTunnelPt()
+  // 开局留 16 单位空档再出块：先让玩家熟悉歪头控船，别一上来就要够两侧
+  t.nextOrbZ = CFG.SHIP_Z + 16
 }
 
 // 取「相对纵深 zr」处的隧道参数（相邻控制点线性插值）
@@ -716,6 +873,173 @@ function tunnelAt(zr) {
   return { cx: last.cx, hw: last.hw }
 }
 
+// ---------------------------------------------------------------- ★ P0 能量块
+// 设计要点（改这块前先读）：
+//  ① 块的横向位置写成「隧道中心线 cx + off × 半宽 hw」。因为中心线本身在摆动，
+//     块跟着它走 —— 玩家的「跟随隧道」和「吃块」是同一套动作，**只有 off
+//     （相对中心线的偏移）才是额外付出的颈部横摆量**。
+//  ② 生成单位是 **pattern（串）**而不是单块。一串块构成一条轨迹（由内向外划出去 /
+//     左右横扫 / 来回摆），玩家必须**连续跟随**——那才叫颈部运动；单块只是点一下。
+//  ③ ★ 可玩性红线：相邻块的横向跨度必须能在**本串的节拍**内走完。
+//     飞船满舵 XRANGE=1.15、跟踪系数 dt*14 → 1.03 世界单位约需 0.14 秒（纯机动，
+//     不含人的反应）。真正卡住的是**人的换向速度**：一次 ±13° 头摆约 0.5 秒。
+//     所以：★ 跨度大的 pattern 必须配更长的节拍（gapScale）——
+//     zigzag 的跨度是 sweep 的 10 倍，节拍就得给到 2 倍，否则物理上根本走不完。
+//     难度只敢动 **pattern 权重**，不敢动跨度上限 —— 与隧道曲率是同一条红线。
+//  ④ 收益设计：想拿分就必须离开中线，所以**居中加成从 14 压到 5**（CFG.ROOM_SCORE）。
+//     这是「游戏收益 ↔ 颈椎运动量」第一次对齐：不靠文案劝人动脖子，分数自己会驱动。
+const ORB_PATTERNS = [
+  // offs = 相对隧道半宽的比例，正=右。w(d) = 随难度 0→1 的抽取权重
+  // gapScale = ★ 节拍倍率：跨度越大，块间给的时间越多（见上文红线③）
+  { id: 'sweepR', offs: [0.50, 0.66, 0.79, 0.85], gapScale: 1.00, w: function (d) { return 0.18 + d * 0.24 } },
+  { id: 'sweepL', offs: [-0.50, -0.66, -0.79, -0.85], gapScale: 1.00, w: function (d) { return 0.18 + d * 0.24 } },
+  { id: 'wave',   offs: [-0.85, -0.50, 0.50, 0.85], gapScale: 1.30, w: function (d) { return 0.04 + d * 0.28 } },
+  { id: 'zig',    offs: [-0.78, 0.78, -0.78], gapScale: 1.50, w: function (d) { return d * 0.30 } },
+  { id: 'edgeR',  offs: [0.72], gapScale: 1.00, w: function (d) { return 0.30 - d * 0.10 } },
+  { id: 'edgeL',  offs: [-0.72], gapScale: 1.00, w: function (d) { return 0.30 - d * 0.10 } },
+  { id: 'near',   offs: [0.50], gapScale: 1.00, w: function (d) { return 0.16 - d * 0.13 } }  // 喘息：只轻微偏移
+]
+
+function pickOrbPattern() {
+  const d = diffRatio()
+  let sum = 0
+  for (let i = 0; i < ORB_PATTERNS.length; i++) sum += Math.max(0, ORB_PATTERNS[i].w(d))
+  let r = Math.random() * sum
+  for (let i = 0; i < ORB_PATTERNS.length; i++) {
+    r -= Math.max(0, ORB_PATTERNS[i].w(d))
+    if (r <= 0) return ORB_PATTERNS[i]
+  }
+  return ORB_PATTERNS[0]
+}
+
+// ★ 节拍按**时间**算，不按距离：速度从 9 爬到 20，若按固定距离，越往后节奏越快一倍。
+function orbGapUnits() {
+  const j = 1 + rnd(-CFG.ORB_GAP_JIT, CFG.ORB_GAP_JIT)
+  return Math.max(3.0, S.g.speed * CFG.ORB_GAP_SEC * j)
+}
+
+// 生成一串块，返回「下一串的起点 z」
+function spawnOrbWave(z0) {
+  const g = S.g
+  const t = g.tunnel
+  const p = pickOrbPattern()
+  const flip = Math.random() < 0.5 ? 1 : -1     // 镜像：同一 pattern 也有左右两种走向
+  const base = orbGapUnits()
+  const gap = base * (p.gapScale || 1)          // ★ 跨度大的串给更长节拍（红线③）
+  const n = p.offs.length
+
+  for (let i = 0; i < n; i++) {
+    const z = z0 + i * gap
+    const at = tunnelAt(z - t.scroll)
+    const hw = Math.max(0.20, at.hw)
+    let off = clamp(p.offs[i] * flip, -CFG.ORB_OFF_MAX, CFG.ORB_OFF_MAX)
+    // 兜底：保证「中线附近没有块」（pattern 表里最内是 0.50，这条是防御性的）
+    if (Math.abs(off) < CFG.ORB_OFF_MIN) off = (off < 0 ? -1 : 1) * CFG.ORB_OFF_MIN
+    g.orbs.push({
+      zt: z, wx: at.cx + off * hw, off: off, gapScale: p.gapScale || 1,
+      taken: false, pz: NaN, spin: Math.random() * Math.PI * 2
+    })
+  }
+  // 串与串之间留半个基拍的喘息 —— 这点张弛就是 P1「张弛节拍」的雏形
+  return z0 + n * gap + base * 0.5
+}
+
+// 在隧道前方补足块（只在控制点已经铺好后调用，否则 tunnelAt 取不到正确的 cx/hw）
+function refillOrbs() {
+  if (!CFG.ORB_ON) return
+  const t = S.g.tunnel
+  // ★ 生成上限贴着**视野上限**（不是 TUN_FWD）：块一生成就应该在（或刚进）可视范围，
+  //   否则它会先被 updateOrbs 的裁剪删掉，永远等不到进入视野那一刻。
+  const limit = t.scroll + CFG.SHIP_Z + CFG.ORB_VIEW
+  let guard = 0
+  while (t.nextOrbZ < limit && guard++ < 24) t.nextOrbZ = spawnOrbWave(t.nextOrbZ)
+}
+
+function takeOrb(o) {
+  const g = S.g
+  o.taken = true
+  g.combo++
+  g.comboT = CFG.COMBO_SEC
+  const mul = Math.min(g.combo, CFG.COMBO_CAP)
+  const add = CFG.ORB_SCORE * mul
+  g.score += add
+  g.took++
+  g.comboPop = 1
+  g.comboPopTxt = '+' + Math.round(add) + (mul > 1 ? ' ×' + mul : '')
+  g.orbFlash = 1
+  g.offSum += Math.abs(o.off); g.offN++
+  burst(o.wx, o.zt, C.orb, 9)
+  sfxOrb(g.combo)
+  try { wx.vibrateShort({ type: 'light' }) } catch (e) { /* 平台不支持就静默 */ }
+}
+
+function updateOrbs(dt) {
+  const g = S.g
+  const t = g.tunnel
+  const shipZt = t.scroll + CFG.SHIP_Z
+  const catchX = CFG.SHIP_HW + CFG.ORB_R + CFG.ORB_CATCH
+
+  // 连击计时：超时归零（错过**不**清零，见下）
+  if (g.comboT > 0) {
+    g.comboT -= dt
+    if (g.comboT <= 0) { g.comboT = 0; g.combo = 0 }
+  }
+  if (g.comboPop > 0) g.comboPop = Math.max(0, g.comboPop - dt * 1.6)
+  if (g.orbFlash > 0) g.orbFlash = Math.max(0, g.orbFlash - dt * 2.6)
+
+  const keep = []
+  for (let i = 0; i < g.orbs.length; i++) {
+    const o = g.orbs[i]
+    o.spin += dt * 2.2
+    const dz = o.zt - shipZt
+
+    // ★ 判定用「跨越飞船平面」而不是「落在窗口内」：
+    //   高速时一帧能推进 0.46 世界单位，窗口式判定会漏检，跨越式永不漏。
+    if (!o.taken && !isNaN(o.pz) && o.pz > 0 && dz <= 0) {
+      if (Math.abs(g.wx - o.wx) < catchX) takeOrb(o)
+      // ★ 没吃到**不清连击**：玩家可能是主动放弃（避开管壁），惩罚只留给蹭壁。
+      //   对「舒缓」产品，惩罚要温和；连击断在撞墙上才合理。
+      else g.miss++
+    }
+    o.pz = dz
+
+    // ★ 裁剪：只砍「已被越过」的块（dz < -6）。**上界必须远大于可见纵深** ——
+    //   串内后续的块天然生成在更远处，若拿可见上限当裁剪线会把它们立刻删掉，
+    //   屏幕上就会出现周期性空窗（这正是 O15b 抓到的 bug）。
+    if (dz > -6 && dz < CFG.ORB_VIEW + 40) keep.push(o)
+  }
+  g.orbs = keep
+}
+
+// ---------------------------------------------------------------- 粒子（P2）
+// 池化 + 硬上限：长局内存不会无限爬升（超限丢最老的）
+function burst(wx, zt, color, n) {
+  const g = S.g
+  for (let i = 0; i < n; i++) {
+    if (g.parts.length >= CFG.P_MAX) g.parts.shift()
+    g.parts.push({
+      wx: wx, zt: zt,
+      vx: rnd(-0.85, 0.85), vz: rnd(-0.6, 1.8),
+      life: 1, decay: rnd(1.7, 3.1),
+      color: color, r: rnd(0.018, 0.048)
+    })
+  }
+}
+
+function updateParts(dt) {
+  const g = S.g
+  const keep = []
+  for (let i = 0; i < g.parts.length; i++) {
+    const p = g.parts[i]
+    p.wx += p.vx * dt
+    p.zt += p.vz * dt
+    p.vz *= (1 - dt * 1.6)
+    p.life -= dt * p.decay
+    if (p.life > 0) keep.push(p)
+  }
+  g.parts = keep
+}
+
 function updateWorld(dt) {
   const g = S.g
   const t = g.tunnel
@@ -731,6 +1055,8 @@ function updateWorld(dt) {
   const pts = t.pts
   while (pts.length > 2 && (pts[0].zt - t.scroll) < -CFG.TUN_BACK) pts.shift()
   while (pts.length < 2 || (pts[pts.length - 1].zt - t.scroll) < CFG.TUN_FWD) pushTunnelPt()
+  // ★ 必须在控制点补足**之后**再铺块：spawnOrbWave 要 tunnelAt() 取正确的 cx/hw
+  refillOrbs()
 
   // 飞船平面处的隧道参数 → 判定
   const at = tunnelAt(CFG.SHIP_Z)
@@ -747,16 +1073,24 @@ function updateWorld(dt) {
       g.shake = 1
       g.flash = 1
       g.hitFlash = 1
+      // ★ 蹭壁才断连击（错过块不断）—— 惩罚只留给"撞墙"，因为未吃到块
+      //   很可能是玩家主动放弃（用放弃收益换安全），不该倒扣。
+      g.combo = 0; g.comboT = 0
+      burst(at.cx + (d > 0 ? 1 : -1) * at.hw, t.scroll + CFG.SHIP_Z, C.bad, 7)
+      sfxHit()
       if (g.lives <= 0) gameOver()
     }
     // 蹭壁：向管内轻推（不是硬传送，保留位置感）
     g.wx = clamp(at.cx + (d > 0 ? 1 : -1) * gap * 0.45, -CFG.X_LIMIT, CFG.X_LIMIT)
   }
 
-  // 计分：存活 + 居中加成（越贴中心线越赚 → 引导"稳住"而非"猛冲"）
+  // 计分：存活 + 居中保底（★ 14 → CFG.ROOM_SCORE：能量块才是主收益，
+  // 否则"贴中线"和"去够块"两个目标会互相打架）
   g.t += dt
   g.score += g.speed * dt * 0.5
-  g.score += g.cent * 14 * dt
+  g.score += g.cent * CFG.ROOM_SCORE * dt
+  // 显示分数缓动追真实分数：吃块时数字会"跳"一下，静态数字没有反馈感
+  g.scoreShow += (g.score - g.scoreShow) * Math.min(1, dt * 8)
 
   g.shake = Math.max(0, g.shake - dt * 3)
   g.flash = Math.max(0, g.flash - dt * 2.5)
@@ -800,10 +1134,18 @@ function startRun() {
   const g = S.g
   g.wx = 0; g.tgt = 0; g.tilt = 0
   g.score = 0; g.lives = CFG.LIVES; g.invulnUntil = 0
+  g.scoreShow = 0
   g.t = 0; g.speed = CFG.SPEED_MIN
   g.shake = 0; g.flash = 0; g.hitFlash = 0
   g.boostUntil = 0; g.boostCoolAt = 0; g.boosting = false
   g.hits = 0; g.cent = 1; g.centSum = 0; g.centN = 0
+  g.dead = false
+  // P0/P2 状态复位
+  g.orbs = []; g.parts = []
+  g.combo = 0; g.comboT = 0; g.comboPop = 0; g.comboPopTxt = ''
+  g.orbFlash = 0; g.took = 0; g.miss = 0
+  g.offSum = 0; g.offN = 0
+  g.pausedAt = 0; g.endedByUser = false
   initTunnel()
   S.neck = { left: 0, right: 0, activity: 0, side: 0 }
   ctl.f = 0; ctl.prev = 0; ctl.vel = 0; ctl.smooth = 0
@@ -814,16 +1156,55 @@ function startRun() {
   S.pose.calibrated = true
   initStars()
   S.mode = 'play'
+  sfxStart()
 }
 
 function gameOver() {
   const g = S.g
   g.dead = true
+  g.scoreShow = g.score        // 结算页显示真实分数，别停在缓动途中
   S.mode = 'over'
   if (g.score > g.best) {
     g.best = Math.round(g.score)
     try { wx.setStorageSync('bd_best', g.best) } catch (e) { /* ignore */ }
   }
+  sfxOver()
+}
+
+// ★ 暂停：世界冻结（render 里跳过 updateWorld/Orbs/Parts），
+//   但**姿态链路保持热**（stepDetect 照跑）→ 恢复时没有 400ms 的丢脸回中空窗。
+function pauseRun() {
+  if (S.mode !== 'play') return
+  S.g.pausedAt = Date.now()
+  // 冻结时把视觉冲击清掉，否则暂停层背后会一直闪
+  S.g.shake = 0; S.g.flash = 0; S.g.hitFlash = 0
+  S.mode = 'paused'
+}
+
+function resumeRun() {
+  if (S.mode !== 'paused') return
+  const g = S.g
+  const dtms = Date.now() - (g.pausedAt || Date.now())
+  // ★ 绝对时间戳全部平移 —— 否则暂停 30 秒回来，无敌时间（1.2s）和 Boost
+  //   冷却（4s）都被暂停"偷走"了，玩家会莫名其妙吃到一次额外扣血。
+  if (g.invulnUntil) g.invulnUntil += dtms
+  if (g.boostUntil) g.boostUntil += dtms
+  if (g.boostCoolAt) g.boostCoolAt += dtms
+  if (S.det.latHit) S.det.latHit += dtms
+  g.pausedAt = 0
+  // 恢复瞬间重标零点：玩家多半趁暂停挪了坐姿/手机，沿用旧零点会立刻跑偏
+  resetCtl()
+  S.pose.nYaw = S.pose.yaw
+  S.pose.nPitch = S.pose.pitch
+  S.pose.nRoll = S.pose.roll
+  S.mode = 'play'
+}
+
+// 主动结束本局（从暂停层进入）→ 走和死亡同一条结算路径，但换文案
+function endByUser() {
+  if (S.mode !== 'paused') return
+  S.g.endedByUser = true
+  gameOver()
 }
 
 // ---------------------------------------------------------------- 渲染
@@ -843,9 +1224,15 @@ function render() {
   if (S.mode === 'play') {
     updateControl(dt)
     updateBoost(dt)
-    updateWorld(dt)
+    updateWorld(dt)     // 内部会 refillOrbs() 铺新块
+    updateOrbs(dt)      // ★ 必须在 updateWorld 之后（依赖刚铺好的块）
+    updateParts(dt)
     updateFx(dt)
     trackNeck()
+  } else if (S.mode === 'paused') {
+    // ★ 世界完全冻结：不推进 world / orbs / parts，也不消费输入 ——
+    //   暂停层背后还在流动，玩家会以为没暂停成功。但姿态链路（下面 stepDetect）
+    //   照常跑，这样恢复时没有 400ms 的"丢脸 → 输入回中"空窗。
   } else {
     updateFx(dt * (S.mode === 'boot' ? 0.35 : 0.6))
   }
@@ -905,8 +1292,10 @@ function draw(dt, now) {
 
   drawStars()
   drawTunnel()
+  drawOrbs()      // ★ 隧道之上、飞船之下：块是"管道内的漂浮物"
   drawStreaks()
   drawShip()
+  drawParts()     // ★ 粒子压在最上层：吃块的爆散要盖过飞船才醒目
 
   ctx.setTransform(1, 0, 0, 1, 0, 0)
 
@@ -914,11 +1303,18 @@ function draw(dt, now) {
     ctx.fillStyle = 'rgba(255,90,74,' + (g.flash * 0.35) + ')'
     ctx.fillRect(0, 0, W, H)
   }
+  // ★ 吃块脉冲：整屏极淡一层青光。刻意不用震屏 —— 震屏是"惩罚"语汇，
+  //   而吃块是奖励；奖励用亮度，惩罚用抖动用红，两者不能混。
+  if (g.orbFlash > 0.01) {
+    ctx.fillStyle = 'rgba(94,240,216,' + (g.orbFlash * 0.10) + ')'
+    ctx.fillRect(0, 0, W, H)
+  }
 
   if (S.mode === 'boot') {
     drawBoot()
   } else {
     drawHud(now)
+    if (S.mode === 'paused') drawPaused()
     if (S.mode === 'over') drawOver()
   }
 }
@@ -1090,6 +1486,165 @@ function drawShip() {
   ctx.restore()
 }
 
+// 能量块渲染：远→近（画家算法）。旋转菱形 + 内核 + 呼吸光晕。
+// 呼吸脉冲不是装饰 —— 静态几何图形在第一版里几乎抓不住注意力；
+// 让块自己"跳"起来，玩家才会主动去找下一个该往哪歪。
+function drawOrbs() {
+  const g = S.g
+  const t = g.tunnel
+  if (!g.orbs.length) return
+  const order = g.orbs.slice().sort(function (a, b) { return b.zt - a.zt })
+  const now = Date.now()
+  for (let i = 0; i < order.length; i++) {
+    const o = order[i]
+    if (o.taken) continue
+    const zr = o.zt - t.scroll
+    if (zr < 4.5 || zr > CFG.Z_FAR) continue
+    const c = project(o.wx, zr)
+    const R = Math.max(1.6, CFG.ORB_R * c.s)
+    // 空气透视：越远越淡
+    const a = clamp(0.32 + (1 - (zr - 4.5) / (CFG.Z_FAR - 4.5)) * 0.68, 0.32, 1)
+    const pulse = 0.84 + 0.16 * Math.sin(now / 210 + o.spin)
+
+    ctx.globalAlpha = a * 0.32
+    ctx.fillStyle = C.orbGlow
+    ctx.beginPath(); ctx.arc(c.x, c.y, R * 2.3 * pulse, 0, Math.PI * 2); ctx.fill()
+
+    ctx.globalAlpha = a
+    ctx.save()
+    ctx.translate(c.x, c.y)
+    ctx.rotate(o.spin)
+    ctx.fillStyle = C.orb
+    ctx.beginPath()
+    ctx.moveTo(0, -R * 1.15)
+    ctx.lineTo(R * 0.68, 0)
+    ctx.lineTo(0, R * 1.15)
+    ctx.lineTo(-R * 0.68, 0)
+    ctx.closePath()
+    ctx.fill()
+    ctx.fillStyle = C.orbCore
+    ctx.beginPath(); ctx.arc(0, 0, Math.max(0.8, R * 0.34), 0, Math.PI * 2); ctx.fill()
+    ctx.restore()
+  }
+  ctx.globalAlpha = 1
+}
+
+function drawParts() {
+  const g = S.g
+  const t = g.tunnel
+  for (let i = 0; i < g.parts.length; i++) {
+    const p = g.parts[i]
+    const zr = p.zt - t.scroll
+    if (zr < 2 || zr > CFG.Z_FAR) continue
+    const c = project(p.wx, zr)
+    const R = Math.max(0.7, p.r * c.s)
+    ctx.globalAlpha = clamp(p.life, 0, 1) * 0.95
+    ctx.fillStyle = p.color
+    ctx.beginPath(); ctx.arc(c.x, c.y, R, 0, Math.PI * 2); ctx.fill()
+  }
+  ctx.globalAlpha = 1
+}
+
+// 吃到块的弹出文字（+30 ×3）：出现在画面中上部，一出现最大、然后缩小淡出
+function drawComboPop() {
+  const g = S.g
+  if (g.comboPop <= 0.01 || !g.comboPopTxt) return
+  const u = Math.min(W, H)
+  const k = g.comboPop
+  const scale = 1 + k * 0.5
+  const alpha = clamp(k * 2.6, 0, 1)
+  ctx.save()
+  ctx.textAlign = 'center'
+  ctx.globalAlpha = alpha
+  ctx.translate(W / 2, H * 0.26)
+  ctx.scale(scale, scale)
+  ctx.fillStyle = C.orb
+  ctx.font = 'bold ' + Math.round(u * 0.052) + 'px sans-serif'
+  ctx.fillText(g.comboPopTxt, 0, 0)
+  ctx.restore()
+  ctx.globalAlpha = 1
+  ctx.textAlign = 'left'
+}
+
+function inRect(r, x, y) {
+  return !!r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h
+}
+
+// 暂停图标：两条竖杠（手绘，不依赖字体里有没有 ⏸）
+function drawPauseIcon(x, y, w, h) {
+  ctx.fillStyle = 'rgba(15,22,48,0.85)'
+  ctx.fillRect(x, y, w, h)
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1
+  ctx.strokeRect(x, y, w, h)
+  ctx.fillStyle = C.fg
+  const bw = Math.max(2, Math.round(w * 0.11))
+  const bh = Math.round(h * 0.46)
+  const by = y + (h - bh) / 2
+  ctx.fillRect(x + w * 0.35 - bw / 2, by, bw, bh)
+  ctx.fillRect(x + w * 0.65 - bw / 2, by, bw, bh)
+}
+
+function drawPaused() {
+  const g = S.g
+  const cx = W / 2
+  const u = Math.min(W, H)
+  ctx.textAlign = 'center'
+  ctx.fillStyle = 'rgba(5,7,15,0.86)'
+  ctx.fillRect(0, 0, W, H)
+
+  ctx.fillStyle = C.accent
+  ctx.font = 'bold ' + Math.round(u * 0.062) + 'px sans-serif'
+  ctx.fillText('已暂停', cx, H * 0.28)
+
+  ctx.fillStyle = C.fg
+  ctx.font = Math.round(u * 0.048) + 'px sans-serif'
+  ctx.fillText(fmtScore(g.score) + ' 分', cx, H * 0.35)
+
+  const nk = S.neck
+  const bal = (nk.left + nk.right > 0)
+    ? Math.round(Math.min(nk.left, nk.right) / Math.max(nk.left, nk.right) * 100) : 100
+  const cen = g.centN > 0 ? Math.round(g.centSum / g.centN * 100) : 100
+  const off = g.offN > 0 ? Math.round(g.offSum / g.offN * 100) : 0
+
+  ctx.font = Math.round(u * 0.032) + 'px sans-serif'
+  ctx.fillStyle = C.ok
+  ctx.fillText('颈椎活动 ' + nk.activity + ' 次 · 左 ' + nk.left + ' 右 ' + nk.right + ' · 平衡 ' + bal + '%', cx, H * 0.415)
+  ctx.fillStyle = C.orb
+  ctx.fillText('能量块 ' + g.took + ' 个 · 平均离中线 ' + off + '%', cx, H * 0.455)
+  ctx.fillStyle = C.dim
+  ctx.fillText('蹭壁 ' + g.hits + ' 次 · 平均居中 ' + cen + '%', cx, H * 0.495)
+
+  const bw = Math.min(W * 0.36, u * 0.44)
+  const bh = Math.max(36, Math.round(u * 0.082))
+  const by = H * 0.575
+  const gap = W * 0.05
+  S.btn.pui = [
+    { act: 'resume', x: cx - gap / 2 - bw, y: by, w: bw, h: bh, t: '继续', col: C.accent },
+    { act: 'end',    x: cx + gap / 2, y: by, w: bw, h: bh, t: '结束本节', col: C.warn }
+  ]
+  for (let i = 0; i < S.btn.pui.length; i++) {
+    const b = S.btn.pui[i]
+    ctx.fillStyle = 'rgba(15,22,48,0.92)'
+    ctx.fillRect(b.x, b.y, b.w, b.h)
+    ctx.strokeStyle = b.col; ctx.lineWidth = 1.5
+    ctx.strokeRect(b.x, b.y, b.w, b.h)
+    ctx.fillStyle = b.col
+    ctx.font = Math.round(u * 0.036) + 'px sans-serif'
+    ctx.fillText(b.t, b.x + b.w / 2, b.y + b.h / 2 + u * 0.014)
+  }
+
+  const swY = by + bh + u * 0.055
+  ctx.fillStyle = CFG.AUDIO_ON ? C.ok : C.dim
+  ctx.font = Math.round(u * 0.028) + 'px sans-serif'
+  ctx.fillText('音效:' + (CFG.AUDIO_ON ? '开' : '关') + (S.audio === 'off' ? '（本机不支持）' : ''), cx, swY)
+  S.btn.aSW = { x: cx - u * 0.17, y: swY - u * 0.034, w: u * 0.34, h: u * 0.058 }
+
+  ctx.fillStyle = 'rgba(127,143,196,0.65)'
+  ctx.font = Math.round(u * 0.024) + 'px sans-serif'
+  ctx.fillText('随时可以歇一歇 —— 脖子放松一下', cx, H * 0.89)
+  ctx.textAlign = 'left'
+}
+
 function fmtScore(v) {
   v = Math.round(v)
   return v >= 10000 ? (Math.round(v / 100) / 10) + 'w' : String(v)
@@ -1108,7 +1663,26 @@ function drawHud(now) {
   ctx.textAlign = 'left'
   ctx.fillStyle = C.fg
   ctx.font = 'bold ' + fsBig + 'px sans-serif'
-  ctx.fillText(fmtScore(g.score), pad, L.top)
+  const scoreTxt = fmtScore(g.scoreShow)
+  ctx.fillText(scoreTxt, pad, L.top)
+
+  // 连击：紧跟分数后面（combo ≤ 1 不画，避免"×1"这种噪音）
+  if (g.combo > 1) {
+    const sw = ctx.measureText(scoreTxt).width
+    ctx.fillStyle = C.orb
+    ctx.font = 'bold ' + Math.round(fs * 0.92) + 'px sans-serif'
+    ctx.fillText('×' + Math.min(g.combo, CFG.COMBO_CAP), pad + sw + 6, L.top - fs * 0.18)
+  }
+
+  // ★ 暂停按钮（顶部正中：避让左上的分数/连击与右上方的生命·速度条）
+  S.btn.pause = null
+  if (S.mode === 'play') {
+    const pb = Math.max(26, Math.round(fs * 1.9))
+    const px = Math.round(W / 2 - pb / 2)
+    const py = Math.round((L.top + fs * 1.2) / 2 - pb / 2)
+    S.btn.pause = { x: px, y: py, w: pb, h: pb }
+    drawPauseIcon(px, py, pb, pb)
+  }
 
   // 生命
   ctx.textAlign = 'right'
@@ -1183,17 +1757,20 @@ function drawHud(now) {
     ctx.textAlign = 'left'
   }
 
-  // 底部三按钮：控制模式 / 输入源 / 相机可见性
-  const bh = Math.max(28, Math.round(fs * 1.9))
-  const gapB = 7
-  const bwid = (W - L.pad * 2 - gapB * 2) / 3
+  // 底部四按钮：控制模式 / 幅度 / 输入源 / 相机可见性
+  const NBTN = 4
+  const bh = Math.max(26, Math.round(fs * 1.8))
+  const gapB = 6
+  const bwid = (W - L.pad * 2 - gapB * (NBTN - 1)) / NBTN
   const btnY = H - L.pad - bh
   S.btn.y = btnY; S.btn.h = bh; S.btn.w = bwid
-  S.btn.xs = [L.pad, L.pad + bwid + gapB, L.pad + (bwid + gapB) * 2]
+  S.btn.xs = []
+  for (let i = 0; i < NBTN; i++) S.btn.xs.push(L.pad + (bwid + gapB) * i)
   const labels = [
-    { i: 0, t: '控制:' + ctrlMode().label, col: C.accent },
-    { i: 1, t: '输入源:' + srcLabel(), col: S.srcActive === 'visionkit' ? C.ok : C.warn },
-    { i: 2, t: S.camVisible ? '相机:可见' : '相机:隐藏', col: C.dim }
+    { i: 0, t: '控制:' + ctrlMode().short, col: C.accent },
+    { i: 1, t: '幅度:' + curRange().label, col: C.accent },
+    { i: 2, t: '输入源:' + srcLabel(), col: S.srcActive === 'visionkit' ? C.ok : C.warn },
+    { i: 3, t: S.camVisible ? '相机:可见' : '相机:隐藏', col: C.dim }
   ]
   for (let i = 0; i < labels.length; i++) {
     const b = labels[i]
@@ -1204,11 +1781,14 @@ function drawHud(now) {
     ctx.lineWidth = 1
     ctx.strokeRect(x, btnY, bwid, bh)
     ctx.fillStyle = b.col
-    ctx.font = Math.max(9, Math.round(fs * 0.76)) + 'px sans-serif'
+    ctx.font = Math.max(8, Math.round(fs * 0.66)) + 'px sans-serif'
     ctx.textAlign = 'center'
-    ctx.fillText(b.t, x + bwid / 2, btnY + bh / 2 + fs * 0.30)
+    ctx.fillText(b.t, x + bwid / 2, btnY + bh / 2 + fs * 0.28)
   }
   ctx.textAlign = 'left'
+
+  // 弹出反馈放最后画：不被 HUD 其它元素盖住
+  drawComboPop()
 }
 
 // 命中第几个底部按钮（-1 = 没中）
@@ -1226,6 +1806,7 @@ function srcLabel() {
 }
 
 function saveCtrl() { try { wx.setStorageSync('bd_ctrl', S.ctrlIdx) } catch (e) { /* ignore */ } }
+function saveRange() { try { wx.setStorageSync('bd_range', S.rangeIdx) } catch (e) { /* ignore */ } }
 
 function drawBoot() {
   const cx = W / 2
@@ -1244,51 +1825,79 @@ function drawBoot() {
   let tip = '点屏幕开始'
   if (!S.hasCam || !S.hasVK) tip = '摄像头不可用 · 点屏幕用触摸开始'
   ctx.fillText(tip, cx, H * 0.56)
-  ctx.fillText('坐直、手机立起来，正对屏幕', cx, H * 0.605)
-  ctx.fillText('头向左右肩歪 → 飞船左右移动', cx, H * 0.65)
+  ctx.fillText('坐直、手机立起来，正对屏幕', cx, H * 0.60)
+  ctx.fillText('头向左右肩歪 → 飞船左右移动', cx, H * 0.645)
+  ctx.fillStyle = C.orb
+  ctx.fillText('去够青色能量块 · 贴中线能保命但没分', cx, H * 0.685)
 
   if (S.err) {
     ctx.fillStyle = C.bad
     ctx.font = Math.round(Math.min(W, H) * 0.026) + 'px sans-serif'
-    ctx.fillText(S.err.slice(0, 40), cx, H * 0.72)
+    ctx.fillText(S.err.slice(0, 40), cx, H * 0.735)
   }
   ctx.textAlign = 'left'
 }
 
 function drawOver() {
   const cx = W / 2
+  const g = S.g
+  const u = Math.min(W, H)
   ctx.textAlign = 'center'
   ctx.fillStyle = 'rgba(5,7,15,0.78)'
   ctx.fillRect(0, 0, W, H)
 
-  ctx.fillStyle = C.bad
-  ctx.font = 'bold ' + Math.round(Math.min(W, H) * 0.062) + 'px sans-serif'
-  ctx.fillText('本局结束', cx, H * 0.34)
+  // 主动收工 ≠ 撞光血量：文案和颜色都要分开，否则"想歇了就停"会被当成失败
+  const byUser = g.endedByUser
+  ctx.fillStyle = byUser ? C.accent : C.bad
+  ctx.font = 'bold ' + Math.round(u * 0.062) + 'px sans-serif'
+  ctx.fillText(byUser ? '本节完成' : '本局结束', cx, H * 0.34)
 
-  const g = S.g
   ctx.fillStyle = C.fg
-  ctx.font = Math.round(Math.min(W, H) * 0.052) + 'px sans-serif'
+  ctx.font = Math.round(u * 0.052) + 'px sans-serif'
   ctx.fillText(fmtScore(g.score) + ' 分', cx, H * 0.42)
 
   ctx.fillStyle = C.dim
-  ctx.font = Math.round(Math.min(W, H) * 0.032) + 'px sans-serif'
+  ctx.font = Math.round(u * 0.032) + 'px sans-serif'
   ctx.fillText('最高 ' + fmtScore(g.best), cx, H * 0.47)
 
   const nk = S.neck
+  const bal = (nk.left + nk.right > 0)
+    ? Math.round(Math.min(nk.left, nk.right) / Math.max(nk.left, nk.right) * 100) : 100
   ctx.fillStyle = C.ok
   ctx.fillText('本局活动颈椎 ' + nk.activity + ' 次', cx, H * 0.53)
   ctx.fillStyle = C.dim
-  ctx.fillText('左 ' + nk.left + ' · 右 ' + nk.right + '（平衡 ' +
-    (nk.left + nk.right > 0 ? Math.round(Math.min(nk.left, nk.right) / Math.max(nk.left, nk.right) * 100) : 100) + '%）', cx, H * 0.57)
+  ctx.fillText('左 ' + nk.left + ' · 右 ' + nk.right + '（平衡 ' + bal + '%）', cx, H * 0.572)
+
+  // ★ 这一行是本版存在的理由：把"你到底把脖子动了多远"量化出来
+  const off = g.offN > 0 ? Math.round(g.offSum / g.offN * 100) : 0
+  ctx.fillStyle = C.orb
+  ctx.fillText('能量块 ' + g.took + ' 个 · 平均离中线 ' + off + '%', cx, H * 0.614)
 
   const cen = g.centN > 0 ? Math.round(g.centSum / g.centN * 100) : 100
   ctx.fillStyle = C.warn
-  ctx.fillText('蹭壁 ' + g.hits + ' 次 · 平均居中 ' + cen + '%', cx, H * 0.615)
+  ctx.fillText('蹭壁 ' + g.hits + ' 次 · 平均居中 ' + cen + '%', cx, H * 0.656)
 
   ctx.fillStyle = C.accent
-  ctx.font = Math.round(Math.min(W, H) * 0.036) + 'px sans-serif'
-  ctx.fillText('点屏幕再来一局', cx, H * 0.70)
+  ctx.font = Math.round(u * 0.036) + 'px sans-serif'
+  ctx.fillText('点屏幕再来一局', cx, H * 0.74)
   ctx.textAlign = 'left'
+}
+
+// 命中暂停层里的控件
+function hitUI(x, y) {
+  const l = S.btn.pui || []
+  for (let i = 0; i < l.length; i++) if (inRect(l[i], x, y)) return l[i].act
+  if (inRect(S.btn.aSW, x, y)) return 'audio'
+  return ''
+}
+
+function toggleAudio() {
+  CFG.AUDIO_ON = !CFG.AUDIO_ON
+  try { wx.setStorageSync('bd_audio', CFG.AUDIO_ON ? 1 : 0) } catch (e) { /* ignore */ }
+  if (CFG.AUDIO_ON) {
+    if (AC === false) { AC = null; initAudio() }   // 之前创建失败过 → 重试一次
+    tone(660, 0.10, 'triangle', 0.14)              // 立刻给个确认音，否则用户不知道开没开
+  }
 }
 
 // ---------------------------------------------------------------- 输入
@@ -1297,7 +1906,22 @@ wx.onTouchStart(function (e) {
   if (!t) return
   const tx = t.clientX, ty = t.clientY
 
-  // 底部三按钮
+  // ★ iOS 上 WebAudio 必须由用户手势唤醒 → 每次触摸补一次 resume（幂等）
+  initAudio()
+
+  // ① 暂停层：吃掉全部输入，避免误触底下的按钮
+  if (S.mode === 'paused') {
+    const act = hitUI(tx, ty)
+    if (act === 'resume') resumeRun()
+    else if (act === 'end') endByUser()
+    else if (act === 'audio') toggleAudio()
+    return
+  }
+
+  // ② 暂停按钮（只在游玩中生效）
+  if (S.mode === 'play' && inRect(S.btn.pause, tx, ty)) { pauseRun(); return }
+
+  // ③ 底部四按钮
   if (ty >= S.btn.y - 8 && ty <= S.btn.y + S.btn.h + 8) {
     const bi = hitBtn(tx)
     if (bi === 0) {
@@ -1307,8 +1931,15 @@ wx.onTouchStart(function (e) {
       resetCtl()
       return
     }
-    if (bi === 1) { switchSource(); return }
-    if (bi === 2) {
+    if (bi === 1) {
+      // 切换「幅度」档：紧凑(20°) → 标准(30°) → 舒展(40°)
+      S.rangeIdx = (S.rangeIdx + 1) % RANGES.length
+      saveRange()
+      resetCtl()
+      return
+    }
+    if (bi === 2) { switchSource(); return }
+    if (bi === 3) {
       S.camVisible = !S.camVisible
       stopCam()
       S.srcActive = 'none'

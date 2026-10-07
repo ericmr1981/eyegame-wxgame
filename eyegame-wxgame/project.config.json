@@ -5,6 +5,18 @@
       {
         "value": ".backup",
         "type": "folder"
+      },
+      {
+        "value": "smoke",
+        "type": "folder"
+      },
+      {
+        "value": "headtrack.js",
+        "type": "file"
+      },
+      {
+        "value": "sim_v14.png",
+        "type": "file"
       }
     ],
     "include": []
