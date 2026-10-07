@@ -1,6 +1,7 @@
 {
-  "deviceOrientation": "landscape",
+  "deviceOrientation": "portrait",
   "showStatusBar": false,
+  "workers": "workers",
   "networkTimeout": {
     "request": 5000,
     "connectSocket": 5000,
