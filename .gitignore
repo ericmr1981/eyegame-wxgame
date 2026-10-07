@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# 微信开发者工具私有配置（各人本地环境不同，不入库）
+project.private.config.json
+
+# WorkBuddy 工作产物（每次会话自动生成）
+.workbuddy/artifacts/
+
+# 依赖与日志
+node_modules/
+*.log
