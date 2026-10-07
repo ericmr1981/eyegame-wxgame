@@ -9,14 +9,23 @@
 // 「可玩」优先：能在真机上跑起来，转头能控制飞船、世界在流动、有速度感。
 // 手感参数（死区/EMA/外推）都是初值，真机试完再调。
 //
-// ── 核心设计（照规格实现）──────────────────────────────────────
+// ── 核心设计 ──────────────────────────────────────────────────
 //   · 纵轴卷轴：飞船在 y=0.78H，世界迎面涌来（伪 3D，尺寸 ∝ 1/z）
-//   · yaw 左右转 → 飞船横向位移（已实测：左转↗右转↘，不做方向反转）
+//   · ★ 转向方向一致（用户 2026-10-07 修正）：**左转头 → 飞船左移**。
+//     POC 实测「左转 yaw 增大、右转 yaw 减小」，而投影 x = cx + wx*PPX/z
+//     是「wx 越大越靠右」→ 直接相乘会得到「左转右移」，必须取反。
+//     统一由 CFG.YAW_SIGN 控制，真机若仍反向只改这一个常量。
+//   · ★ 玩法 = **穿越隧道**（用户 2026-10-07 修正，替代原「5 泳道躲障碍」）：
+//     一条连续蜿蜒的管道，飞船要尽量**待在管内、贴近中心线**；蹭管壁扣血。
+//     为什么换成隧道：① 隧道是**连续追踪**，正好匹配 17~21/s 采样 +
+//     44~58ms 延迟的能力边界（躲障碍要的"瞬间精确"做不到）；
+//     ② 颈椎是**平滑连续摆动**而非急促甩头，对产品定位更友好；
+//     ③ 纵轴高速 + 管壁/肋条冲刺，速度感与代入感天然更强。
 //   · pitch 抬头 → Boost 氮气（短促动作 + 冷却，不是"保持角度=保持速度"）
 //   · roll 仅作机身倾斜装饰（σ≈4°，不参与操作）
-//   · ★ 速度感与可玩性解耦：世界流动速度受可反应时间约束（≤1.3 H/s），
-//     而视觉速度（星场/速度线/尾迹）自由拉高到 4~6 倍 —— 爽感靠视觉层
-//   · 5 泳道防挫败：每波**至少留 1 条空泳道**，且与上一波空泳道相邻可达
+//   · ★ 速度感与可玩性解耦：世界流动速度受可反应时间约束，而视觉速度
+//     （星场/速度线/尾迹/隧道肋条）自由拉高 —— 爽感靠视觉层；
+//     隧道的**曲率上限**同样由可反应时间反推（见 TUN_SLOPE_*）
 //
 // ── 三种姿态源（自动降级）──────────────────────────────────────
 //   visionkit（主）→ gyro（陀螺仪兜底）→ touch（触摸，开发/演示用）
@@ -59,17 +68,26 @@ const CFG = {
   HORIZON_R: 0.22,        // 地平线位置（占屏高）
   SHIP_Y_R: 0.78,         // 飞船位置（占屏高）
   SHIP_Z: 8,              // 飞船纵深（世界单位）
-  Z_FAR: 30,              // 障碍生成纵深
-  Z_NEAR: 5.5,            // 纵深远于此则回收（≈刚滑出屏幕下沿）
+  Z_FAR: 30,              // 隧道采样最远纵深
+  Z_NEAR: 6.0,            // 隧道最近采样纵深（在飞船平面之下，属正常）
 
-  LANES: 5,               // 泳道数
-  LANE_W: 0.5,            // 泳道宽（世界单位）
   SHIP_HW: 0.10,          // 飞船半宽（世界单位）
-  OBS_HW: 0.20,           // 障碍半宽（世界单位）
-  X_LIMIT: 1.05,          // 飞船横向软限位
+  X_LIMIT: 1.25,          // 飞船横向软限位
+
+  // ---- 隧道（穿越玩法）----
+  TUN_HH: 1.10,           // 隧道截面半高（世界单位，纯视觉不参与判定）
+  TUN_HW_MAX: 0.66,       // 隧道半宽：简单档
+  TUN_HW_MIN: 0.42,       // 隧道半宽：困难档（越窄越难）
+  TUN_STEP: 4.0,          // 中心线控制点沿 z 间距（世界单位）
+  TUN_SLOPE_MIN: 0.12,    // 中心线最大斜率：简单档（单位 z 的横向变化量）
+  TUN_SLOPE_MAX: 0.28,    // 中心线最大斜率：困难档
+  TUN_X_LIMIT: 0.85,      // 中心线横向活动范围（+半宽 ≤ X_LIMIT，保证够得着）
+  TUN_BACK: 24,           // 飞船身后保留纵深
+  TUN_FWD: 64,            // 飞船身前生成纵深
 
   // 控制
   YAW_GAIN: 2.2,          // yaw(rad) → 世界横向：0.45rad(26°) ≈ 世界单位 1.0
+  YAW_SIGN: -1,           // ★ 左转→左移（POC 实测左转 yaw 增大，故须取反）
   YAW_DEAD: 0.052,        // 死区 3°
   EMA_A: 0.35,            // 指数平滑
   EXTRAP: 0.55,           // 速率外推（补延迟）
@@ -155,11 +173,11 @@ const S = {
     invulnUntil: 0, dead: false,
     t: 0,                       // 本局时间（秒）
     speed: CFG.SPEED_MIN,
-    nextSpawn: 0,
-    obs: [], stars: [], streaks: [],
-    shake: 0, flash: 0,
+    tunnel: { pts: [], dir: 0, dirTgt: 0, scroll: 0 },
+    stars: [], streaks: [],
+    shake: 0, flash: 0, hitFlash: 0,
     boostUntil: 0, boostCoolAt: 0, boosting: false,
-    dodged: 0
+    hits: 0, cent: 1, centSum: 0, centN: 0
   },
 
   // 颈椎记账
@@ -460,7 +478,9 @@ function switchSource() {
 const ctl = { f: 0, prev: 0 }
 function updateControl(dt) {
   const p = S.pose
-  const raw = p.yaw - p.nYaw
+  // ★ 方向一致：POC 实测左转 yaw 增大，而屏幕 x 随 wx 增大右移
+  //   → 乘 YAW_SIGN(-1)，得到「左转 → 飞船左移」
+  const raw = (p.yaw - p.nYaw) * CFG.YAW_SIGN
 
   // 死区
   const dead = Math.abs(raw) < CFG.YAW_DEAD ? 0 : raw
@@ -488,6 +508,7 @@ function updateControl(dt) {
 // 颈椎活动记账：带滞回的左右转头计数
 // ⚠️ 必须"先退出滞回、再重新判定"，否则从左直接切到右时那一次会被吞掉
 //    （冒烟 H1 抓到的 bug：旧写法一次调用只能退回到中立，要等下一帧才计数）
+// ⚠️ 左右方向同样按 POC 实测校正：**左转 yaw 增大** → y>0 记为左转
 function trackNeck() {
   const y = S.pose.yaw - S.pose.nYaw
   const th = 0.17           // 触发阈值 ≈10°
@@ -495,8 +516,8 @@ function trackNeck() {
   if (nk.side === 1 && y < th * 0.5) nk.side = 0
   else if (nk.side === -1 && y > -th * 0.5) nk.side = 0
   if (nk.side === 0) {
-    if (y > th) { nk.side = 1; nk.right++; nk.activity++ }
-    else if (y < -th) { nk.side = -1; nk.left++; nk.activity++ }
+    if (y > th) { nk.side = 1; nk.left++; nk.activity++ }
+    else if (y < -th) { nk.side = -1; nk.right++; nk.activity++ }
   }
 }
 
@@ -521,93 +542,111 @@ function updateBoost(dt) {
 // ---------------------------------------------------------------- 世界
 function diffRatio() { return clamp(S.g.t / CFG.RAMP_SEC, 0, 1) }
 
-function laneToWx(lane) { return (lane - (CFG.LANES - 1) / 2) * CFG.LANE_W }
+// ---------------------------------------------------------------- 隧道
+// 中心线用**控制点链**表示：pts = [{ zt, cx, hw }]，zt = **世界坐标**（越大越远）。
+// 飞船固定在世界坐标 zt = scroll + SHIP_Z，故某点的相对纵深 = zt - scroll。
+// ★ 生成约束：相邻控制点的横向变化 ≤ 斜率上限 × 间距。这条上限由
+//   「飞船横移能力 vs 可反应时间」反推，保证**永远跟得上**——
+//   这就是「可玩性红线」落在隧道上的形式（难度只敢提到 0.28）。
+function tunSlope() { return lerp(CFG.TUN_SLOPE_MIN, CFG.TUN_SLOPE_MAX, diffRatio()) }
+function tunHalfW() { return lerp(CFG.TUN_HW_MAX, CFG.TUN_HW_MIN, diffRatio()) }
 
-let lastOpen = []
-function spawnWave() {
+function pushTunnelPt() {
+  const t = S.g.tunnel
+  const pts = t.pts
+  const last = pts[pts.length - 1]
+  const step = CFG.TUN_STEP
+
+  // 蜿蜒方向：有惯性（不会抖）+ 偶尔换向 + 贴边反弹 → 平滑的左右摆动
+  if (Math.random() < 0.20) t.dirTgt = rnd(-1, 1)
+  if (last.cx > CFG.TUN_X_LIMIT - 0.12 && t.dirTgt > 0) t.dirTgt = -Math.abs(t.dirTgt)
+  if (last.cx < -(CFG.TUN_X_LIMIT - 0.12) && t.dirTgt < 0) t.dirTgt = Math.abs(t.dirTgt)
+  t.dir += (t.dirTgt - t.dir) * 0.22
+
+  const maxStep = tunSlope() * step
+  const cx = clamp(last.cx + t.dir * maxStep, -CFG.TUN_X_LIMIT, CFG.TUN_X_LIMIT)
+
+  // 半宽缓慢起伏（但不低于当前难度下限）
+  const base = tunHalfW()
+  const hw = clamp(last.hw + rnd(-0.05, 0.05), base, base * 1.25)
+
+  pts.push({ zt: last.zt + step, cx: cx, hw: hw })
+}
+
+function initTunnel() {
   const g = S.g
-  const n = CFG.LANES
-  const d = diffRatio()
+  const t = g.tunnel
+  t.scroll = 0; t.dir = 0; t.dirTgt = 0
+  t.pts = []
+  const hw0 = CFG.TUN_HW_MAX
+  // 开局先给一段平直段（别一上来就拐）；飞船 zt = SHIP_Z 正处在其中
+  for (let i = 0; i <= 4; i++) t.pts.push({ zt: i * CFG.TUN_STEP, cx: 0, hw: hw0 })
+  while (t.pts[t.pts.length - 1].zt < CFG.SHIP_Z + CFG.TUN_FWD) pushTunnelPt()
+}
 
-  // 1) 先保一条"可达空泳道"：优先取上一波空泳道本身或其邻居
-  let keepOpen = -1
-  if (lastOpen.length) {
-    const pri = []
-    for (let i = 0; i < lastOpen.length; i++) {
-      const p = lastOpen[i]
-      if (p - 1 >= 0) pri.push(p - 1)
-      pri.push(p)
-      if (p + 1 <= n - 1) pri.push(p + 1)
+// 取「相对纵深 zr」处的隧道参数（相邻控制点线性插值）
+function tunnelAt(zr) {
+  const t = S.g.tunnel
+  const pts = t.pts
+  if (!pts.length) return { cx: 0, hw: CFG.TUN_HW_MAX }
+  const zt = t.scroll + zr
+  if (zt <= pts[0].zt) return { cx: pts[0].cx, hw: pts[0].hw }
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1]
+    if (zt >= a.zt && zt <= b.zt) {
+      const f = (zt - a.zt) / Math.max(0.0001, b.zt - a.zt)
+      return { cx: lerp(a.cx, b.cx, f), hw: lerp(a.hw, b.hw, f) }
     }
-    keepOpen = pri[Math.floor(Math.random() * pri.length)]
   }
-
-  // 2) 从剩余泳道里随机占用（占用数随难度 1→3，永远给"可通行"留位置）
-  const pool = []
-  for (let i = 0; i < n; i++) if (i !== keepOpen) pool.push(i)
-  for (let i = pool.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1))
-    const t = pool[i]; pool[i] = pool[j]; pool[j] = t
-  }
-  const maxOcc = Math.min(pool.length, 1 + Math.round(d * 2))
-  const occ = 1 + Math.floor(Math.random() * maxOcc)
-
-  const open = []
-  for (let i = 0; i < n; i++) open.push(i)
-  for (let i = 0; i < occ; i++) {
-    const lane = pool[i]
-    open[lane] = -1
-    g.obs.push({ lane: lane, wx: laneToWx(lane), z: CFG.Z_FAR, hit: false, counted: false })
-  }
-  lastOpen = open.filter(function (v) { return v >= 0 })
+  const last = pts[pts.length - 1]
+  return { cx: last.cx, hw: last.hw }
 }
 
 function updateWorld(dt) {
   const g = S.g
+  const t = g.tunnel
+  const now = Date.now()
 
   // 速度随难度爬升
   g.speed = lerp(CFG.SPEED_MIN, CFG.SPEED_MAX, diffRatio())
 
-  // 生成
-  g.nextSpawn -= dt
-  if (g.nextSpawn <= 0) {
-    spawnWave()
-    g.nextSpawn = lerp(CFG.GAP_START, CFG.GAP_END, diffRatio())
-  }
+  // 世界推进
+  t.scroll += g.speed * dt
 
-  // 推进 + 碰撞
-  const dz = g.speed * dt
-  const now = Date.now()
-  for (let i = g.obs.length - 1; i >= 0; i--) {
-    const o = g.obs[i]
-    const zPrev = o.z
-    o.z -= dz
+  // 裁剪身后、补足身前（控制点数恒定，成本 O(1)）
+  const pts = t.pts
+  while (pts.length > 2 && (pts[0].zt - t.scroll) < -CFG.TUN_BACK) pts.shift()
+  while (pts.length < 2 || (pts[pts.length - 1].zt - t.scroll) < CFG.TUN_FWD) pushTunnelPt()
 
-    // 穿过飞船平面 → 判定
-    if (!o.hit && zPrev > CFG.SHIP_Z && o.z <= CFG.SHIP_Z) {
-      const dw = Math.abs(o.wx - g.wx)
-      if (dw < CFG.OBS_HW + CFG.SHIP_HW) {
-        o.hit = true
-        if (now > g.invulnUntil) {
-          g.lives--
-          g.invulnUntil = now + CFG.INVULN_MS
-          g.shake = 1
-          g.flash = 1
-          if (g.lives <= 0) gameOver()
-        }
-      } else if (!o.counted) {
-        o.counted = true
-        g.dodged++
-        g.score += 10
-      }
+  // 飞船平面处的隧道参数 → 判定
+  const at = tunnelAt(CFG.SHIP_Z)
+  const d = g.wx - at.cx                        // 有符号偏离
+  const gap = at.hw - CFG.SHIP_HW               // 允许的最大偏离
+  g.cent = clamp(1 - Math.abs(d) / Math.max(0.01, at.hw), 0, 1)
+  g.centSum += g.cent; g.centN++
+
+  if (Math.abs(d) > gap) {
+    if (now > g.invulnUntil) {
+      g.lives--
+      g.hits++
+      g.invulnUntil = now + CFG.INVULN_MS
+      g.shake = 1
+      g.flash = 1
+      g.hitFlash = 1
+      if (g.lives <= 0) gameOver()
     }
-    if (o.z < CFG.Z_NEAR) g.obs.splice(i, 1)
+    // 蹭壁：向管内轻推（不是硬传送，保留位置感）
+    g.wx = clamp(at.cx + (d > 0 ? 1 : -1) * gap * 0.45, -CFG.X_LIMIT, CFG.X_LIMIT)
   }
 
+  // 计分：存活 + 居中加成（越贴中心线越赚 → 引导"稳住"而非"猛冲"）
   g.t += dt
-  g.score += g.speed * dt * 0.6      // 存活即得分
+  g.score += g.speed * dt * 0.5
+  g.score += g.cent * 14 * dt
+
   g.shake = Math.max(0, g.shake - dt * 3)
   g.flash = Math.max(0, g.flash - dt * 2.5)
+  g.hitFlash = Math.max(0, g.hitFlash - dt * 2)
 }
 
 function initStars() {
@@ -647,11 +686,11 @@ function startRun() {
   const g = S.g
   g.wx = 0; g.tgt = 0; g.tilt = 0
   g.score = 0; g.lives = CFG.LIVES; g.invulnUntil = 0
-  g.t = 0; g.speed = CFG.SPEED_MIN; g.nextSpawn = 0.9
-  g.obs = []; g.shake = 0; g.flash = 0
+  g.t = 0; g.speed = CFG.SPEED_MIN
+  g.shake = 0; g.flash = 0; g.hitFlash = 0
   g.boostUntil = 0; g.boostCoolAt = 0; g.boosting = false
-  g.dodged = 0
-  lastOpen = []
+  g.hits = 0; g.cent = 1; g.centSum = 0; g.centN = 0
+  initTunnel()
   S.neck = { left: 0, right: 0, activity: 0, side: 0 }
   ctl.f = 0; ctl.prev = 0
   S.pose.nYaw = S.pose.yaw
@@ -749,8 +788,7 @@ function draw(dt, now) {
   ctx.fillRect(-20, -20, W + 40, L.horizon)
 
   drawStars()
-  drawLanes()
-  drawObstacles()
+  drawTunnel()
   drawStreaks()
   drawShip()
 
@@ -782,60 +820,77 @@ function drawStars() {
   ctx.globalAlpha = 1
 }
 
-function drawLanes() {
+// 隧道渲染：近密远疏对数采样 → 左右管壁（连续光带）+ 横向肋条（从远到近渐亮）
+// 肋条是速度感的主力：每根环向前冲过来，"在管道里钻"的代入感全靠它。
+function tunnelSamples(n) {
+  const out = []
+  const zN = CFG.Z_NEAR, zF = CFG.Z_FAR
+  const k = zF / zN
+  for (let i = 0; i <= n; i++) {
+    const z = zN * Math.pow(k, i / n)
+    const at = tunnelAt(z)
+    const c = project(at.cx, z)
+    out.push({ x: c.x, y: c.y, hw: at.hw * c.s, hh: CFG.TUN_HH * c.s, z: z })
+  }
+  return out
+}
+
+function drawTunnel() {
+  const g = S.g
+  const hit = g.hitFlash || 0
+  const boost = g.boosting
+
   // 地平线
-  ctx.strokeStyle = 'rgba(122,162,255,0.30)'
+  ctx.strokeStyle = 'rgba(122,162,255,0.22)'
   ctx.lineWidth = 1
   ctx.beginPath()
   ctx.moveTo(0, L.horizon)
   ctx.lineTo(W, L.horizon)
   ctx.stroke()
 
-  // 泳道分隔线（透视收敛，帮忙读通道）
-  const half = (CFG.LANES - 1) / 2
-  ctx.strokeStyle = 'rgba(36,48,96,0.85)'
-  ctx.lineWidth = 1
-  for (let i = 0; i <= CFG.LANES; i++) {
-    const wx = (i - half - 0.5) * CFG.LANE_W
-    const a = project(wx, CFG.Z_FAR)
-    const b = project(wx, CFG.Z_NEAR)
+  const ss = tunnelSamples(20)
+
+  // ① 左右管壁：连续折线（先铺半透明粗线做辉光，再压一条细亮线）
+  for (let side = -1; side <= 1; side += 2) {
+    for (let pass = 0; pass < 2; pass++) {
+      ctx.beginPath()
+      for (let i = 0; i < ss.length; i++) {
+        const p = ss[i]
+        const x = p.x + side * p.hw
+        if (i === 0) ctx.moveTo(x, p.y); else ctx.lineTo(x, p.y)
+      }
+      if (pass === 0) {
+        ctx.strokeStyle = 'rgba(90,140,255,' + (0.20 + hit * 0.55) + ')'
+        ctx.lineWidth = 7
+      } else {
+        ctx.strokeStyle = hit > 0.02 ? 'rgba(255,140,120,0.95)'
+          : (boost ? 'rgba(255,225,168,0.90)' : 'rgba(150,200,255,0.78)')
+        ctx.lineWidth = 2
+      }
+      ctx.stroke()
+    }
+  }
+
+  // ② 横向肋条（从远到近，越近越亮、越粗 → 强速度感）
+  for (let i = ss.length - 1; i >= 0; i--) {
+    const p = ss[i]
+    const zn = clamp(1 - (p.z - CFG.Z_NEAR) / (CFG.Z_FAR - CFG.Z_NEAR), 0, 1)
+    ctx.globalAlpha = 0.05 + zn * zn * 0.40
+    ctx.strokeStyle = boost ? '#ffe1a8' : '#8fb8ff'
+    ctx.lineWidth = zn > 0.72 ? 2 : 1
     ctx.beginPath()
-    ctx.moveTo(a.x, a.y)
-    ctx.lineTo(b.x, b.y)
+    ctx.moveTo(p.x - p.hw, p.y - p.hh); ctx.lineTo(p.x + p.hw, p.y - p.hh)
+    ctx.moveTo(p.x - p.hw, p.y + p.hh); ctx.lineTo(p.x + p.hw, p.y + p.hh)
     ctx.stroke()
   }
-}
-
-function drawObstacles() {
-  const g = S.g
-  const now = Date.now()
-  g.obs.sort(function (a, b) { return b.z - a.z })     // 远的先画
-  for (let i = 0; i < g.obs.length; i++) {
-    const o = g.obs[i]
-    const p = project(o.wx, o.z)
-    const half = CFG.OBS_HW * p.s
-    const hh = 0.30 * p.s            // 障碍世界高度 0.6（用同一透视系数）
-    if (p.y < -20) continue
-
-    // 预告区（屏幕上部 15%）：只画轮廓，提示"前面有东西"
-    const inForecast = p.y < L.horizon + (L.shipY - L.horizon) * 0.20
-    const alpha = inForecast ? 0.35 : 1
-
-    ctx.globalAlpha = alpha
-    ctx.fillStyle = C.obs
-    ctx.fillRect(p.x - half, p.y - hh, half * 2, hh * 2)
-    ctx.strokeStyle = C.obsEdge
-    ctx.lineWidth = 1
-    ctx.strokeRect(p.x - half, p.y - hh, half * 2, hh * 2)
-    ctx.globalAlpha = 1
-  }
+  ctx.globalAlpha = 1
 }
 
 function drawStreaks() {
   const g = S.g
   const vis = (g.speed / CFG.SPEED_MAX) * (g.boosting ? CFG.BOOST_GAIN : 1)
   const cx = L.cx
-  const cy = L.shipY * 0.86
+  const cy = L.horizon + (L.shipY - L.horizon) * 0.15   // 消失点（向地平线收敛）
   const R = Math.hypot(W, H) * 0.6
   ctx.lineCap = 'round'
   for (let i = 0; i < g.streaks.length; i++) {
@@ -955,7 +1010,7 @@ function drawHud(now) {
   const bal = nk.left + nk.right > 0
     ? Math.round(Math.min(nk.left, nk.right) / Math.max(1, Math.max(nk.left, nk.right)) * 100)
     : 100
-  ctx.fillText('转头 ' + nk.activity + ' 次 · 平衡 ' + bal + '%', pad, L.top + fs * 1.5)
+  ctx.fillText('转头 ' + nk.activity + ' · 平衡 ' + bal + '% · 居中 ' + Math.round(g.cent * 100) + '%', pad, L.top + fs * 1.5)
 
   // 速度条（顶部右侧）
   const bw = W * 0.30
@@ -1044,7 +1099,7 @@ function drawBoot() {
   ctx.fillText('脖动圈', cx, H * 0.40)
   ctx.fillStyle = C.fg
   ctx.font = Math.round(Math.min(W, H) * 0.036) + 'px sans-serif'
-  ctx.fillText('转头即转向 · 用你的颈椎开飞船', cx, H * 0.46)
+  ctx.fillText('转头即转向 · 穿越隧道', cx, H * 0.46)
 
   ctx.fillStyle = C.dim
   ctx.font = Math.round(Math.min(W, H) * 0.030) + 'px sans-serif'
@@ -1087,9 +1142,13 @@ function drawOver() {
   ctx.fillText('左 ' + nk.left + ' · 右 ' + nk.right + '（平衡 ' +
     (nk.left + nk.right > 0 ? Math.round(Math.min(nk.left, nk.right) / Math.max(nk.left, nk.right) * 100) : 100) + '%）', cx, H * 0.57)
 
+  const cen = g.centN > 0 ? Math.round(g.centSum / g.centN * 100) : 100
+  ctx.fillStyle = C.warn
+  ctx.fillText('蹭壁 ' + g.hits + ' 次 · 平均居中 ' + cen + '%', cx, H * 0.615)
+
   ctx.fillStyle = C.accent
   ctx.font = Math.round(Math.min(W, H) * 0.036) + 'px sans-serif'
-  ctx.fillText('点屏幕再来一局', cx, H * 0.68)
+  ctx.fillText('点屏幕再来一局', cx, H * 0.70)
   ctx.textAlign = 'left'
 }
 
