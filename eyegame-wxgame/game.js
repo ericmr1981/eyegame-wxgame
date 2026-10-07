@@ -11,10 +11,18 @@
 //
 // ── 核心设计 ──────────────────────────────────────────────────
 //   · 纵轴卷轴：飞船在 y=0.78H，世界迎面涌来（伪 3D，尺寸 ∝ 1/z）
-//   · ★ 转向方向一致（用户 2026-10-07 修正）：**左转头 → 飞船左移**。
-//     POC 实测「左转 yaw 增大、右转 yaw 减小」，而投影 x = cx + wx*PPX/z
-//     是「wx 越大越靠右」→ 直接相乘会得到「左转右移」，必须取反。
-//     统一由 CFG.YAW_SIGN 控制，真机若仍反向只改这一个常量。
+//   · ★★ 主控轴 = **歪头（roll）**，不是转头（用户 2026-10-07 二次修正）：
+//     用户反馈「脑袋向左右肩歪」比「左右转头」对脖子更舒服 → 换成 roll 主控。
+//     ⚠️ 这里有个硬约束：POC 实测两个轴的信噪比差 3~5 倍 ——
+//        yaw  σ ≈ 0.013~0.026 rad（<1.5°）  → 干净
+//        roll σ ≈ 0.074 rad（≈4.2°）        → 噪声大，**这正是上一版把 roll
+//        降级成"仅装饰"的原因**。所以要它做主控，滤波必须做厚：
+//        死区 3°→4°、EMA τ 0.09s→0.20s、外推 0.55→0.40。
+//     ⚠️ 符号仍未实测：`CFG.ROLL_SIGN` 一处收口；真机若左右反了，
+//        点「控制」按钮切到「歪头·位置反」档（同一个 sign 取负），
+//        或直接把常量翻过来。
+//   · 符号约定（两个轴统一）：**轴值 > 0 ⟺ 飞船向右移**。
+//     所以"头向左肩歪 / 向左转头"必须映射成**负**轴值。
 //   · ★ 玩法 = **穿越隧道**（用户 2026-10-07 修正，替代原「5 泳道躲障碍」）：
 //     一条连续蜿蜒的管道，飞船要尽量**待在管内、贴近中心线**；蹭管壁扣血。
 //     为什么换成隧道：① 隧道是**连续追踪**，正好匹配 17~21/s 采样 +
@@ -22,7 +30,10 @@
 //     ② 颈椎是**平滑连续摆动**而非急促甩头，对产品定位更友好；
 //     ③ 纵轴高速 + 管壁/肋条冲刺，速度感与代入感天然更强。
 //   · pitch 抬头 → Boost 氮气（短促动作 + 冷却，不是"保持角度=保持速度"）
-//   · roll 仅作机身倾斜装饰（σ≈4°，不参与操作）
+//   · roll → **主控轴**（歪头即转向）+ 机身压倾（与操作同向 → 代入感）
+//   · 控制律两条（「控制」按钮现场切）：
+//       位置律（默认）：轴值 → 目标横向**位置**，所见即所得，追踪弯道最直观
+//       速度律：轴值 → 目标横向**速度**，噪声被积分再平滑一次更稳，回正即缓停
 //   · ★ 速度感与可玩性解耦：世界流动速度受可反应时间约束，而视觉速度
 //     （星场/速度线/尾迹/隧道肋条）自由拉高 —— 爽感靠视觉层；
 //     隧道的**曲率上限**同样由可反应时间反推（见 TUN_SLOPE_*）
@@ -85,13 +96,36 @@ const CFG = {
   TUN_BACK: 24,           // 飞船身后保留纵深
   TUN_FWD: 64,            // 飞船身前生成纵深
 
-  // 控制
+  // ---- 控制（2026-10-08：主控轴改为「歪头 roll」）----
+  // 两个轴信噪比差别很大，参数必须分开写，不能共用：
+  //   yaw  σ ≈ 0.013~0.026 rad（<1.5°）→ 干净，小死区 + 快 EMA
+  //   roll σ ≈ 0.074 rad（≈4.2°）      → 噪声大 3~5 倍，大死区 + 慢 EMA
+  CTRL_IDX: 0,            // 控制模式索引（见 CTRL_MODES）：0=歪头·位置
+  ROLL_SIGN: -1,          // ★ 头向左肩歪 → 飞船左移（真机若反：切「歪头·位置反」档，或直接翻这里）
+  ROLL_DEAD: 0.070,       // roll 死区 4°（必须比 yaw 的 3° 大，否则噪声穿透）
+  ROLL_FULL: 0.349,       // roll 满量程 20°（达到最大横向输出）
+  ROLL_TAU: 0.20,         // roll EMA 时间常数(s)：噪声大 → 比 yaw 平滑一倍以上
+  ROLL_EXTRAP: 0.40,      // roll 速率外推权重（比 yaw 保守，避免把噪声一起放大）
+  ROLL_XRANGE: 1.15,      // 位置律：满倾角 → 世界横向 ±1.15
+  ROLL_VMAX: 5.5,         // 速度律：满倾角 → 横向速度（世界单位/s）
+  TILT_K: 0.55,           // 机身随歪头压倾幅度（纯视觉；与操作同向 = 代入感）
+
+  // yaw（保留为可选 / 回退档）
   YAW_GAIN: 2.2,          // yaw(rad) → 世界横向：0.45rad(26°) ≈ 世界单位 1.0
   YAW_SIGN: -1,           // ★ 左转→左移（POC 实测左转 yaw 增大，故须取反）
   YAW_DEAD: 0.052,        // 死区 3°
-  EMA_A: 0.35,            // 指数平滑
-  EXTRAP: 0.55,           // 速率外推（补延迟）
-  ROLL_K: 0.30,           // roll 只做装饰
+  YAW_FULL: 0.45,         // 满量程 26°
+  YAW_TAU: 0.09,          // EMA 时间常数(s)
+  YAW_EXTRAP: 0.55,       // 速率外推（补延迟）
+  EMA_A: 0.35,            // （旧字段，保留兼容）
+  EXTRAP: 0.55,           // （旧字段，保留兼容）
+  ROLL_K: 0.30,           // （旧字段，保留兼容）
+
+  // 颈椎记账阈值（跟随当前主控轴）
+  NECK_TH_ROLL: 0.13,     // 歪头计数阈值 ≈7.5°
+  NECK_TH_YAW: 0.17,      // 转头计数阈值 ≈10°
+  NECK_CALM: 0.09,        // 零点慢速校正的"静息带"（带内输出本来就是 0）
+
   PITCH_BOOST: 0.14,      // |pitch| > 8° 触发 Boost（方向待真机确认，先用绝对值）
   BOOST_MAX_MS: 3000,
   BOOST_COOL_MS: 4000,
@@ -162,7 +196,8 @@ const S = {
   // 姿态（弧度）
   pose: {
     yaw: 0, pitch: 0, roll: 0, hasFace: false,
-    nYaw: 0, nPitch: 0, calibrated: false, samples: 0
+    nYaw: 0, nPitch: 0, nRoll: 0,          // 零点：开局标定 + 静息带慢速校正
+    calibrated: false, samples: 0
   },
 
   // 玩法
@@ -183,12 +218,17 @@ const S = {
   // 颈椎记账
   neck: { left: 0, right: 0, activity: 0, side: 0 },
 
+  // 控制模式索引（0=歪头·位置 1=歪头·位置反 2=歪头·速度 3=转头·位置）
+  ctrlIdx: 0,
+
   // 调试
   perf: { renderStamps: [], renderFps: 0 },
-  btn: { y: 0, h: 0, x: 0, w: 0 },
+  btn: { y: 0, h: 0, x: 0, w: 0, xs: [] },
 }
 
 try { S.g.best = wx.getStorageSync('bd_best') || 0 } catch (e) { S.g.best = 0 }
+try { S.ctrlIdx = wx.getStorageSync('bd_ctrl') || 0 } catch (e) { S.ctrlIdx = 0 }
+if (!(S.ctrlIdx >= 0 && S.ctrlIdx < 4)) S.ctrlIdx = 0
 
 let camObj = null
 let workerObj = null
@@ -367,26 +407,27 @@ function applyAngle(ang) {
 }
 
 // ---------------------------------------------------------------- 姿态源：陀螺仪
-const gyro = { y: 0, p: 0, ny: 0, np: 0, n: 0 }
+const gyro = { y: 0, r: 0, ny: 0, nr: 0, n: 0 }
 function startGyro() {
   if (!S.hasAcc) { S.err = '无 startAccelerometer'; return false }
   try {
     wx.startAccelerometer({ interval: 'game' })
-    wx.onAccelerometerChange(function (r) {
-      const g = Math.hypot(r.x, r.y, r.z) || 1
-      const yaw = -r.y / g
-      const pitch = r.x / g
+    wx.onAccelerometerChange(function (a) {
+      const gg = Math.hypot(a.x, a.y, a.z) || 1
+      // 手机在**屏幕平面内**左右倾斜（≈"歪头"这个动作的等价物）→ roll
+      const rollRaw = a.x / gg
+      const yawRaw = -a.y / gg
       gyro.n++
-      if (gyro.n === 1) { gyro.ny = yaw; gyro.np = pitch }
-      const dy = Math.abs(yaw - gyro.ny) > 0.03 ? (yaw - gyro.ny) : 0
-      const dp = Math.abs(pitch - gyro.np) > 0.03 ? (pitch - gyro.np) : 0
+      if (gyro.n === 1) { gyro.nr = rollRaw; gyro.ny = yawRaw }
+      const dr = Math.abs(rollRaw - gyro.nr) > 0.03 ? (rollRaw - gyro.nr) : 0
+      const dy = Math.abs(yawRaw - gyro.ny) > 0.03 ? (yawRaw - gyro.ny) : 0
+      gyro.r += (dr - gyro.r) * 0.25
       gyro.y += (dy - gyro.y) * 0.25
-      gyro.p += (dp - gyro.p) * 0.25
-      // 陀螺仪的量纲与 VisionKit 弧度不同，等比放大到可比区间
+      // 陀螺仪量纲与 VisionKit 弧度不同，等比放大到可比区间
       const p = S.pose
+      p.roll = gyro.r * 1.6
       p.yaw = gyro.y * 1.6
-      p.pitch = gyro.p * 1.6
-      p.roll = 0
+      p.pitch = 0            // ★ 陀螺仪下**关闭 Boost**（俯仰不可靠，规格已约定）
       p.hasFace = true
       p.samples++
     })
@@ -474,50 +515,123 @@ function switchSource() {
 }
 
 // ---------------------------------------------------------------- 控制器
-// yaw(rad) → 飞船目标横向位置；死区 + EMA + 速率外推
-const ctl = { f: 0, prev: 0 }
+// ★ 2026-10-08：主控轴从「转头(yaw)」改为「歪头(roll)」。
+//   为什么：用户反馈"头向左右肩歪"比"左右转头"对脖子更舒服 —— 这是产品定位
+//   层面的判断（转头主要动用颈旋转肌群、持续单侧旋转易累；向肩歪是颈侧屈，
+//   动作幅度小、前庭刺激弱，更放松），我认同。
+//
+//   但工程上有代价：两个轴的信噪比差 3~5 倍（POC v16 实测）——
+//     yaw  σ ≈ 0.013~0.026 rad（<1.5°）→ 干净
+//     roll σ ≈ 0.074 rad（≈4.2°）      → 噪声大
+//   上一版正因这个数才把 roll 定为"仅装饰"。现在要它做主控，三道滤波都得加厚：
+//     死区 3°→4° · EMA τ 0.09s→0.20s · 外推 0.55→0.40
+//
+//   两种控制律（真机用「控制」按钮现场切）：
+//     位置律（默认）：轴值 → 目标横向**位置**。所见即所得，追踪弯道最直观。
+//     速度律：轴值 → 目标横向**速度**。噪声被积分再平滑一次，更稳；回正即缓停，
+//             不需要"一直维持某个歪头角度"（这点与产品定位一致）。
+//
+//   符号约定（两轴统一）：**轴值 > 0 ⟺ 飞船向右移**。
+//   所以"头向左肩歪 / 向左转头"必须映射成负轴值 —— 由 SIGN 常量一处收口。
+const ctl = { f: 0, prev: 0, vel: 0, smooth: 0 }
+
+const CTRL_MODES = [
+  { id: 'roll-pos',   axis: 'roll', law: 'pos', flip: 1,  label: '歪头·位置' },
+  { id: 'roll-pos-r', axis: 'roll', law: 'pos', flip: -1, label: '歪头·位置反' },
+  { id: 'roll-vel',   axis: 'roll', law: 'vel', flip: 1,  label: '歪头·速度' },
+  { id: 'yaw-pos',    axis: 'yaw',  law: 'pos', flip: 1,  label: '转头·位置' }
+]
+function ctrlMode() { return CTRL_MODES[clamp(S.ctrlIdx | 0, 0, CTRL_MODES.length - 1)] }
+function axisSign(axis) { return axis === 'roll' ? CFG.ROLL_SIGN : CFG.YAW_SIGN }
+function resetCtl() { ctl.f = 0; ctl.prev = 0; ctl.vel = 0; ctl.smooth = 0; S.g.tgt = S.g.wx }
+
+// 死区 + 满量程归一化：|v| ≤ dead → 0；|v| = full → ±1；中间线性
+function axisMap(v, dead, full) {
+  const a = Math.abs(v)
+  if (a <= dead) return 0
+  const s = Math.min(1, (a - dead) / Math.max(0.0001, full - dead))
+  return v < 0 ? -s : s
+}
 function updateControl(dt) {
   const p = S.pose
-  // ★ 方向一致：POC 实测左转 yaw 增大，而屏幕 x 随 wx 增大右移
-  //   → 乘 YAW_SIGN(-1)，得到「左转 → 飞船左移」
-  const raw = (p.yaw - p.nYaw) * CFG.YAW_SIGN
+  const g = S.g
+  const m = ctrlMode()
+  const isRoll = m.axis === 'roll'
 
-  // 死区
-  const dead = Math.abs(raw) < CFG.YAW_DEAD ? 0 : raw
+  // ---- 取原始轴值（相对零点）----
+  const base = isRoll ? (p.roll - p.nRoll) : (p.yaw - p.nYaw)
+  const raw = base * axisSign(m.axis) * m.flip
 
-  // EMA 平滑
-  ctl.f = ctl.f + (dead - ctl.f) * CFG.EMA_A
+  const dead = isRoll ? CFG.ROLL_DEAD : CFG.YAW_DEAD
+  const full = isRoll ? CFG.ROLL_FULL : CFG.YAW_FULL
+  const tau = isRoll ? CFG.ROLL_TAU : CFG.YAW_TAU
+  const expK = isRoll ? CFG.ROLL_EXTRAP : CFG.YAW_EXTRAP
 
-  // 速率外推（用当前速度预测一帧后，补 44~58ms 的链路延迟）
+  // ---- 丢脸兜底：>400ms 没检测到脸 → 输入视为回中 ----
+  // 否则飞船会带着"最后一帧的角度"一路跑偏（老版本没有这条）
+  const stale = (S.srcActive === 'visionkit') && (Date.now() - S.det.latHit > 400)
+
+  // ---- 归一化轴值 [-1,1]（死区 + 满量程）----
+  const axis = stale ? 0 : axisMap(raw, dead, full)
+
+  // ---- EMA 平滑（用时间常数，采样率变化时手感一致）----
+  const a = 1 - Math.exp(-dt / Math.max(0.02, tau))
+  ctl.f += (axis - ctl.f) * a
+  // 机身姿态用「未过死区」的归一化值 → 小幅歪头也带一点机身压倾（代入感）
+  const visv = stale ? 0 : clamp(raw / full, -1, 1)
+  ctl.smooth += (visv - ctl.smooth) * a
+
+  // ---- 速率外推（补 44~58ms 链路延迟）----
   const vel = ctl.f - ctl.prev
   ctl.prev = ctl.f
-  const pred = ctl.f + vel * CFG.EXTRAP
+  const pred = ctl.f + vel * expK
 
-  const tgt = clamp(pred * CFG.YAW_GAIN, -CFG.X_LIMIT, CFG.X_LIMIT)
-  const g = S.g
-  g.tgt = tgt
-  // 飞船实际位移略慢于目标，做出"跟手但有质量"的手感
-  g.wx += (tgt - g.wx) * Math.min(1, dt * 14)
-  g.tilt = clamp(p.roll * CFG.ROLL_K, -0.35, 0.35)
+  // ---- 控制律 ----
+  if (m.law === 'vel') {
+    // 速度律：轴值 → 目标横向速度 → 积分成位置（无自动回中；回正即缓停）
+    ctl.vel = pred * CFG.ROLL_VMAX
+    g.tgt = clamp(g.tgt + ctl.vel * dt, -CFG.X_LIMIT, CFG.X_LIMIT)
+  } else {
+    // 位置律：轴值 → 目标横向位置
+    const range = isRoll ? CFG.ROLL_XRANGE : (CFG.YAW_GAIN * CFG.YAW_FULL)
+    g.tgt = clamp(pred * range, -CFG.X_LIMIT, CFG.X_LIMIT)
+  }
+  // 飞船实际位移略慢于目标 → "跟手但有质量"的手感
+  g.wx += (g.tgt - g.wx) * Math.min(1, dt * 14)
+  // 机身压倾：与操作同向（歪头 ↔ 压倾），强化"我就是飞船"的代入感
+  g.tilt = clamp(ctl.smooth * CFG.TILT_K, -0.45, 0.45)
+
+  // ---- 零点慢速校正 ----
+  // 仅在"静息带"内极慢跟随：带内输出本来就是 0，所以**改了也不影响当前操作**，
+  // 只用来吃掉 VisionKit 的慢漂移（否则歪头做主控会像"船慢慢自己跑"）。
+  if (!stale && isRoll && Math.abs(base) < CFG.NECK_CALM) {
+    p.nRoll += (p.roll - p.nRoll) * Math.min(1, dt * 0.10)
+  }
+
+  // ---- 触摸兜底：手指位置直接给横向位置 ----
   if (touch.down) {
-    g.wx += (clamp(touch.x, -1.05, 1.05) - g.wx) * Math.min(1, dt * 16)
+    g.wx += (clamp(touch.x, -CFG.X_LIMIT, CFG.X_LIMIT) - g.wx) * Math.min(1, dt * 16)
     g.tgt = g.wx
   }
 }
 
-// 颈椎活动记账：带滞回的左右转头计数
+// 颈椎活动记账：带滞回的左右计数（**跟随当前主控轴**）
 // ⚠️ 必须"先退出滞回、再重新判定"，否则从左直接切到右时那一次会被吞掉
 //    （冒烟 H1 抓到的 bug：旧写法一次调用只能退回到中立，要等下一帧才计数）
-// ⚠️ 左右方向同样按 POC 实测校正：**左转 yaw 增大** → y>0 记为左转
+// ⚠️ 左右按**物理方向**记（不含「…反」档的 flip）：头朝哪边歪/转就记哪边。
+//    用 v = base × 轴 SIGN，v>0 即"向右"，与控制器同一套符号约定。
 function trackNeck() {
-  const y = S.pose.yaw - S.pose.nYaw
-  const th = 0.17           // 触发阈值 ≈10°
+  const m = ctrlMode()
+  const isRoll = m.axis === 'roll'
+  const base = isRoll ? (S.pose.roll - S.pose.nRoll) : (S.pose.yaw - S.pose.nYaw)
+  const v = base * axisSign(m.axis)
+  const th = isRoll ? CFG.NECK_TH_ROLL : CFG.NECK_TH_YAW
   const nk = S.neck
-  if (nk.side === 1 && y < th * 0.5) nk.side = 0
-  else if (nk.side === -1 && y > -th * 0.5) nk.side = 0
+  if (nk.side === 1 && v < th * 0.5) nk.side = 0
+  else if (nk.side === -1 && v > -th * 0.5) nk.side = 0
   if (nk.side === 0) {
-    if (y > th) { nk.side = 1; nk.left++; nk.activity++ }
-    else if (y < -th) { nk.side = -1; nk.right++; nk.activity++ }
+    if (v < -th) { nk.side = -1; nk.left++; nk.activity++ }
+    else if (v > th) { nk.side = 1; nk.right++; nk.activity++ }
   }
 }
 
@@ -692,9 +806,11 @@ function startRun() {
   g.hits = 0; g.cent = 1; g.centSum = 0; g.centN = 0
   initTunnel()
   S.neck = { left: 0, right: 0, activity: 0, side: 0 }
-  ctl.f = 0; ctl.prev = 0
+  ctl.f = 0; ctl.prev = 0; ctl.vel = 0; ctl.smooth = 0
+  // 开局零点标定：玩家点"开始"时头基本处于中立位 → 用当前三个角做基准
   S.pose.nYaw = S.pose.yaw
   S.pose.nPitch = S.pose.pitch
+  S.pose.nRoll = S.pose.roll
   S.pose.calibrated = true
   initStars()
   S.mode = 'play'
@@ -1010,7 +1126,7 @@ function drawHud(now) {
   const bal = nk.left + nk.right > 0
     ? Math.round(Math.min(nk.left, nk.right) / Math.max(1, Math.max(nk.left, nk.right)) * 100)
     : 100
-  ctx.fillText('转头 ' + nk.activity + ' · 平衡 ' + bal + '% · 居中 ' + Math.round(g.cent * 100) + '%', pad, L.top + fs * 1.5)
+  ctx.fillText('脖动 ' + nk.activity + ' · 平衡 ' + bal + '% · 居中 ' + Math.round(g.cent * 100) + '%', pad, L.top + fs * 1.5)
 
   // 速度条（顶部右侧）
   const bw = W * 0.30
@@ -1035,7 +1151,13 @@ function drawHud(now) {
   const p = S.pose
   const dbg = '渲染' + S.perf.renderFps + '/s · 取帧' + S.fr.fps + '/s · 检' + S.det.fps + '/s'
   ctx.fillText(dbg, pad, H - L.pad - fs * 0.1)
-  const dbg2 = '源:' + S.srcActive + ' · yaw' + (p.yaw - p.nYaw).toFixed(2) + ' pitch' + (p.pitch - p.nPitch).toFixed(2) + ' · 脸' + (now - S.det.latHit < 800 ? '有' : '无')
+  // 第二行：当前主控轴 + 实时读数（**带正负号** —— 真机判"左右是否反了"就靠它）
+  const m = ctrlMode()
+  const base = m.axis === 'roll' ? (p.roll - p.nRoll) : (p.yaw - p.nYaw)
+  const pv = p.pitch - p.nPitch
+  const sg = function (v) { return (v >= 0 ? '+' : '') + v.toFixed(2) }
+  const dbg2 = '源:' + S.srcActive + ' · ' + (m.axis === 'roll' ? '歪头' : '转头') + sg(base) +
+    ' pitch' + sg(pv) + ' · 脸' + (now - S.det.latHit < 800 ? '有' : '无')
   ctx.fillText(dbg2, pad, H - L.pad + fs * 1.2)
 
   // 相机预览位置（可见时才画框；隐藏时画一个装饰性"传感器"标记）
@@ -1061,33 +1183,49 @@ function drawHud(now) {
     ctx.textAlign = 'left'
   }
 
-  // 底部按钮：切换输入源 + 相机可见性
-  const bh = Math.max(30, Math.round(fs * 2.1))
-  const bwid = (W - L.pad * 2 - 8) / 2
-  S.btn.x = L.pad; S.btn.y = H - L.pad - bh; S.btn.w = bwid; S.btn.h = bh
+  // 底部三按钮：控制模式 / 输入源 / 相机可见性
+  const bh = Math.max(28, Math.round(fs * 1.9))
+  const gapB = 7
+  const bwid = (W - L.pad * 2 - gapB * 2) / 3
+  const btnY = H - L.pad - bh
+  S.btn.y = btnY; S.btn.h = bh; S.btn.w = bwid
+  S.btn.xs = [L.pad, L.pad + bwid + gapB, L.pad + (bwid + gapB) * 2]
   const labels = [
-    { x: L.pad, w: bwid, t: '输入源: ' + srcLabel(), col: S.srcActive === 'visionkit' ? C.ok : C.warn },
-    { x: L.pad + bwid + 8, w: bwid, t: S.camVisible ? '相机: 可见' : '相机: 已隐藏', col: C.dim }
+    { i: 0, t: '控制:' + ctrlMode().label, col: C.accent },
+    { i: 1, t: '输入源:' + srcLabel(), col: S.srcActive === 'visionkit' ? C.ok : C.warn },
+    { i: 2, t: S.camVisible ? '相机:可见' : '相机:隐藏', col: C.dim }
   ]
   for (let i = 0; i < labels.length; i++) {
     const b = labels[i]
+    const x = S.btn.xs[b.i]
     ctx.fillStyle = 'rgba(15,22,48,0.85)'
-    ctx.fillRect(b.x, b.y, b.w, b.h)
+    ctx.fillRect(x, btnY, bwid, bh)
     ctx.strokeStyle = C.line
     ctx.lineWidth = 1
-    ctx.strokeRect(b.x, b.y, b.w, b.h)
+    ctx.strokeRect(x, btnY, bwid, bh)
     ctx.fillStyle = b.col
-    ctx.font = Math.max(10, Math.round(fs * 0.85)) + 'px sans-serif'
+    ctx.font = Math.max(9, Math.round(fs * 0.76)) + 'px sans-serif'
     ctx.textAlign = 'center'
-    ctx.fillText(b.t, b.x + b.w / 2, b.y + b.h / 2 + fs * 0.32)
+    ctx.fillText(b.t, x + bwid / 2, btnY + bh / 2 + fs * 0.30)
   }
   ctx.textAlign = 'left'
 }
 
+// 命中第几个底部按钮（-1 = 没中）
+function hitBtn(tx) {
+  const xs = S.btn.xs || []
+  for (let i = 0; i < xs.length; i++) {
+    if (tx >= xs[i] - 2 && tx <= xs[i] + S.btn.w + 2) return i
+  }
+  return -1
+}
+
 function srcLabel() {
-  if (S.srcKind === 'auto') return '自动(' + S.srcActive + ')'
+  if (S.srcKind === 'auto') return '自动'
   return S.srcKind === 'gyro' ? '陀螺仪' : '触摸'
 }
+
+function saveCtrl() { try { wx.setStorageSync('bd_ctrl', S.ctrlIdx) } catch (e) { /* ignore */ } }
 
 function drawBoot() {
   const cx = W / 2
@@ -1099,19 +1237,20 @@ function drawBoot() {
   ctx.fillText('脖动圈', cx, H * 0.40)
   ctx.fillStyle = C.fg
   ctx.font = Math.round(Math.min(W, H) * 0.036) + 'px sans-serif'
-  ctx.fillText('转头即转向 · 穿越隧道', cx, H * 0.46)
+  ctx.fillText('歪头即转向 · 穿越隧道', cx, H * 0.46)
 
   ctx.fillStyle = C.dim
   ctx.font = Math.round(Math.min(W, H) * 0.030) + 'px sans-serif'
   let tip = '点屏幕开始'
   if (!S.hasCam || !S.hasVK) tip = '摄像头不可用 · 点屏幕用触摸开始'
   ctx.fillText(tip, cx, H * 0.56)
-  ctx.fillText('坐直、手机立起来，正对屏幕', cx, H * 0.61)
+  ctx.fillText('坐直、手机立起来，正对屏幕', cx, H * 0.605)
+  ctx.fillText('头向左右肩歪 → 飞船左右移动', cx, H * 0.65)
 
   if (S.err) {
     ctx.fillStyle = C.bad
     ctx.font = Math.round(Math.min(W, H) * 0.026) + 'px sans-serif'
-    ctx.fillText(S.err.slice(0, 40), cx, H * 0.68)
+    ctx.fillText(S.err.slice(0, 40), cx, H * 0.72)
   }
   ctx.textAlign = 'left'
 }
@@ -1158,10 +1297,18 @@ wx.onTouchStart(function (e) {
   if (!t) return
   const tx = t.clientX, ty = t.clientY
 
-  // 底部按钮
+  // 底部三按钮
   if (ty >= S.btn.y - 8 && ty <= S.btn.y + S.btn.h + 8) {
-    if (tx >= S.btn.x && tx <= S.btn.x + S.btn.w) { switchSource(); return }
-    if (tx >= S.btn.x + S.btn.w + 8 && tx <= S.btn.x + S.btn.w * 2 + 16) {
+    const bi = hitBtn(tx)
+    if (bi === 0) {
+      // 切换控制模式：歪头·位置 → 歪头·位置反 → 歪头·速度 → 转头·位置
+      S.ctrlIdx = (S.ctrlIdx + 1) % CTRL_MODES.length
+      saveCtrl()
+      resetCtl()
+      return
+    }
+    if (bi === 1) { switchSource(); return }
+    if (bi === 2) {
       S.camVisible = !S.camVisible
       stopCam()
       S.srcActive = 'none'
