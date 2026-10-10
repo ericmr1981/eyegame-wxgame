@@ -1,6 +1,6 @@
-// smoke/mvp-smoke.js — 纵轴 MVP 离线冒烟（v5：能量块 + 视听反馈 + 暂停）
+// smoke/mvp-smoke.js — 纵轴 MVP 离线冒烟（v7：居中连乘 + 飞船光球）
 // 用假 wx / canvas / worker / VKSession + 可控时钟 + 手动 rAF 驱动完整流程
-// 用法：node eyegame-wxgame/smoke/mvp-smoke.js   （期望「共 156 项，失败 0」）
+// 用法：node eyegame-wxgame/smoke/mvp-smoke.js   （期望「共 174 项，失败 0」）
 //
 // ⚠️ 改了断言或核心常量后**必须跑对照实验**：bash smoke/contrast.sh
 //    故意改坏代码重跑，确认对应断言真的 FAIL —— 否则断言可能只是"恒真"。
@@ -8,6 +8,13 @@
 //      · O3 曾拿 ORB_OFF_MIN 自身当阈值 → 把常量改小就自动通过（守的是常量而非意图）
 //      · O3 曾只检查"视野里现有的几个块" → 样本不足，偶发放过错误
 //      · 对照 3 曾同时改两处 → 两道防线互相掩盖，测不出断流 bug（要一起拆才复现）
+//      · O7e 曾从 orbs 反推串间间隙 → 混入 gapScale 噪声，比值只有 1.02（测不出差别）
+//      · O7 曾用 off×TUN_HW_MAX 当阈值 → 量纲错（跨度 vs 半幅），且没考虑中心线偏移
+//      · M2 曾"设完 mult 就断言" → render() 内部会跑 updateWorld→updateMult 重算倍率，
+//        断言值被静默改掉（表现是"偶尔通过"）。改成把状态钉在**稳定支**上
+//        （贴中线 + multHold 拉满），无论 render 跑几帧结果恒等。
+// ⚠️ 音效那部分（iOS 手势解锁）**测不了** —— 离线打桩了 wx，无法复现真机音频限制，
+//    只能靠真机验证 + HUD 上的诊断文案。
 const fs = require('fs')
 const vm = require('vm')
 const path = require('path')
@@ -30,7 +37,7 @@ const ctx = {}
 const noop = function () {}
 const methods = ['fillRect', 'strokeRect', 'clearRect', 'beginPath', 'closePath', 'moveTo',
   'lineTo', 'stroke', 'fill', 'arc', 'save', 'restore', 'translate', 'rotate',
-  'setTransform', 'putImageData', 'scale']
+  'setTransform', 'putImageData', 'scale', 'bezierCurveTo', 'quadraticCurveTo']
 for (let i = 0; i < methods.length; i++) ctx[methods[i]] = noop
 ctx.fillText = function (s) { texts.push(String(s)) }
 ctx.measureText = function (s) { return { width: String(s).length * 7 } }
@@ -50,7 +57,8 @@ const canvas = { width: 375, height: 812, getContext: function () { return ctx }
 
 /* ---------------- mock wx ---------------- */
 let rafCbs = []
-const H = { touch: [], move: [], end: [], acc: [], resize: [] }
+const H = { touch: [], move: [], end: [], acc: [], resize: [], hide: [], show: [] }
+const screenLog = []         // wx.setKeepScreenOn 调用记录（true / false）
 const memDb = {}
 let camCreateCount = 0
 let camOpts = null
@@ -153,6 +161,10 @@ const WX = {
     return makeFakeAC()
   },
   vibrateShort: function () {},
+  // 屏幕常亮（2026-10-10）：记录调用序列，验证"开局开 / 结算&退后台还原 / 回前台补开"
+  setKeepScreenOn: function (o) { screenLog.push(o && o.keepScreenOn) },
+  onHide: function (f) { H.hide.push(f) },
+  onShow: function (f) { H.show.push(f) },
   __noAudio: false
 }
 
@@ -182,7 +194,13 @@ const injected = src + `
   drawPaused: drawPaused, hitUI: hitUI, inRect: inRect, gameOver: gameOver,
   initAudio: initAudio, tone: tone, sfxOrb: sfxOrb, sfxHit: sfxHit, toggleAudio: toggleAudio,
   resetAudio: function () { AC = null },
-  get audioCtx() { return AC }
+  get audioCtx() { return AC },
+  // ---- v7 新增：居中连乘 ----
+  updateMult: updateMult, multColor: multColor,
+  // ---- v8 新增：金龟子翅膀（倍率驱动）/ 尾焰喷流 / 屏幕常亮 ----
+  drawShip: drawShip, drawTrail: drawTrail, setKeepScreen: setKeepScreen,
+  get wingOpen() { return wingOpen },
+  C: C
 };`
 
 const sandbox = {
@@ -719,14 +737,20 @@ let drawErr = ''
 texts.length = 0
 try {
   api.startRun()
-  api.S.g.wx = 0.3
   api.S.g.tunnel.scroll = 37
+  // ⚠️ render() 内部会跑 updateWorld → updateMult，会重算倍率。
+  //    所以不能"设完 mult 就断言"——要把它钉在**稳定支**上：
+  //    贴中线（cent 高）+ multHold 拉满 → 无论 render 跑几帧，倍率恒为 MULT_MAX。
+  api.S.g.wx = api.tunnelAt(api.CFG.SHIP_Z).cx
+  api.S.g.multHold = api.CFG.MULT_RAMP_SEC
+  api.S.g.mult = api.CFG.MULT_MAX
   api.drawTunnel()
   api.render()
 } catch (e) { drawErr = e && e.message ? e.message : String(e) }
 ok('M1 隧道渲染与整帧 render 无异常', drawErr === '', drawErr)
 const hud = texts.join('|')
-ok('M2 HUD 渲染出居中度读数', hud.indexOf('居中') >= 0, texts.slice(0, 6).join(' / '))
+ok('M2 ★ HUD 渲染出倍率读数（v7：倍率取代了原来的「居中 XX%」）',
+  hud.indexOf('倍率') >= 0 && hud.indexOf('×5.0') >= 0, texts.slice(0, 10).join(' / '))
 ok('M3 HUD 显示控制模式与幅度档',
   hud.indexOf('控制:' + api.ctrlMode().short) >= 0 && hud.indexOf('幅度:' + api.curRange().label) >= 0,
   texts.filter(function (t) { return t.indexOf('控制:') >= 0 || t.indexOf('幅度:') >= 0 }).slice(0, 3).join(' / '))
@@ -753,8 +777,8 @@ function tgtAt(deg, ri) {
   return api.S.g.tgt
 }
 
-ok('N1 默认幅度档 = 标准（满量程 30°）',
-  api.RANGES[1].label === '标准' && Math.abs(degOf(api.RANGES[1].full) - 30) < 1.5,
+ok('N1 默认幅度档 = 标准（满量程 25°）',
+  api.RANGES[1].label === '标准' && Math.abs(degOf(api.RANGES[1].full) - 25) < 1.5,
   'full=' + degOf(api.RANGES[1].full).toFixed(1) + '° label=' + api.RANGES[1].label)
 
 ok('N2 三档动作量单调递增（紧凑 < 标准 < 舒展）',
@@ -769,10 +793,11 @@ ok('N3 ★ 同一歪头角度 → 档位越大输出越小（越不敏感）',
 
 const t20old = tgtAt(20, 0)
 const t20new = tgtAt(20, 1)
-ok('N4 ★★ 20° 不再吃满舵（原 20°=满舵，现标准档只到 ~6 成）',
+ok('N4 ★ 同一角度(20°)在标准档输出明显低于紧凑档（抬高满量程真的降了敏感度）',
   Math.abs(t20old) > api.CFG.ROLL_XRANGE * 0.95 &&
-  Math.abs(t20new) < api.CFG.ROLL_XRANGE * 0.75,
-  '紧凑 ' + t20old.toFixed(3) + ' vs 标准 ' + t20new.toFixed(3) + '（满 ' + api.CFG.ROLL_XRANGE + '）')
+  Math.abs(t20new) < Math.abs(t20old) * 0.85,
+  '紧凑 ' + t20old.toFixed(3) + ' vs 标准 ' + t20new.toFixed(3) +
+  '（比值 ' + (Math.abs(t20new) / Math.abs(t20old) * 100).toFixed(0) + '%，满 ' + api.CFG.ROLL_XRANGE + '）')
 
 const tMax = [tgtAt(45, 0), tgtAt(45, 1), tgtAt(45, 2)]
 ok('N5 ★ 三档满舵机动能力一致（切档不会够不着弯道）',
@@ -835,10 +860,36 @@ api.S.rangeIdx = 1
     const at = api.tunnelAt(o.zt - g.tunnel.scroll)
     if (Math.abs(o.off) * at.hw + api.CFG.ORB_R >= at.hw) wallOk = false
   }
-  ok('O3 ★ 所有块都刻意偏离中线（|off| ≥ 0.45 —— 中线附近必须留空）',
-    minAbsOff >= 0.45,
-    'min|off|=' + minAbsOff.toFixed(2) + '（设计下限，实现里 ORB_OFF_MIN=' + api.CFG.ORB_OFF_MIN + '，样本 ' + sample.length + ' 块）')
+  // ⚠️ 阈值写"设计下限"（0.25）而不是 api.CFG.ORB_OFF_MIN —— 后者会让断言跟着常量一起动，变成恒真
+  ok('O3 ★ 所有块都刻意偏离中线（|off| ≥ 0.25 —— 中线附近必须留空）',
+    minAbsOff >= 0.25,
+    'min|off|=' + minAbsOff.toFixed(2) + '（设计下限 0.25，实现里 ORB_OFF_MIN=' + api.CFG.ORB_OFF_MIN + '，样本 ' + sample.length + ' 块）')
   ok('O4 块本体不穿出管壁（|off|·hw + r < hw）', wallOk)
+
+  // --- O3b ★★ 距离分档铺开（用户反馈「能量块基本靠边，要随机分布」）---
+  // 旧表所有 |off| 都在 0.50~0.85，视觉上块全堆在管壁边。这里把 [0.28, 0.88] 分 4 档，
+  // 要求靠中的两档也占到足够比例 —— 否则"块全贴边"的特征会原样回来。
+  const LO = 0.28, HI = 0.88, binW = (HI - LO) / 4
+  const bins = [0, 0, 0, 0]
+  for (let i = 0; i < sample.length; i++) {
+    const a = Math.abs(sample[i].off)
+    if (a >= LO - 1e-9 && a <= HI + 1e-9) {
+      bins[Math.min(3, Math.floor((a - LO) / binW))]++
+    }
+  }
+  const nearShare = (bins[0] + bins[1]) / Math.max(1, sample.length)
+  ok('O3b ★★ 距离分档铺开（靠中两档占相当比例，不再「基本靠边」）',
+    bins[0] > 0 && bins[1] > 0 && bins[2] > 0 && bins[3] > 0 && nearShare >= 0.30,
+    '四档计数 ' + bins.join('/') + '，靠中两档占比 ' + (nearShare * 100).toFixed(0) + '%')
+
+  // --- O3c ★ 位置是连续分布（jitter 真的生效，不是几个固定档位来回切）---
+  // 没有 jitter 时，off 只可能取到 pattern 表里那 ~18 个离散值；有 jitter 时几乎个个不同。
+  let uniq = {}
+  for (let i = 0; i < sample.length; i++) uniq[sample[i].off.toFixed(3)] = 1
+  const uniqN = Object.keys(uniq).length
+  ok('O3c ★ 块位置连续分布（jitter 生效，不是固定档位循环）',
+    uniqN >= sample.length * 0.4,
+    '不同 off 值 ' + uniqN + ' / 样本 ' + sample.length + ' 块')
 }
 
 {
@@ -862,6 +913,8 @@ api.S.rangeIdx = 1
     for (let j = 0; j + 1 < p.offs.length; j++) {
       worst = Math.max(worst, Math.abs(p.offs[j + 1] - p.offs[j]))
     }
+    // ★ 把 jitter 也算进最坏跨度：相邻两块抖动方向相反时，差距被放大 2×jitter
+    worst += 2 * (p.jitter || 0)
     const world = worst * CFGX.TUN_HW_MAX
     const sec = timeToCover(world)
     stat[p.id] = { worst: worst, beat: beat, sec: sec }
@@ -873,11 +926,25 @@ api.S.rangeIdx = 1
   ok('O5b ★ 最短节拍 ≥ 0.35s（低于这个，人的换向速度跟不上）',
     minBeat >= 0.35, '最短节拍=' + minBeat.toFixed(2) + 's')
 
-  // --- O5c ★★ 跨度越大 → 节拍越长（gapScale 存在的意义；缺了它 zigzag 物理上走不完）---
-  ok('O5c ★★ 最大跨度的串拿到了最长节拍（gapScale 真的在起作用）',
-    stat.zig.beat > stat.sweepR.beat * 1.4 && stat.zig.worst > stat.sweepR.worst * 5,
-    'zig ' + stat.zig.worst.toFixed(2) + '×hw/' + stat.zig.beat.toFixed(2) + 's vs sweepR ' +
-    stat.sweepR.worst.toFixed(2) + '×hw/' + stat.sweepR.beat.toFixed(2) + 's')
+  // --- O5c ★★ gapScale 必须随跨度单调递增（结构性质；缺了它 zigzag 物理上走不完）---
+  // 不比具体数值、只比"排序关系"：以后调跨度上限也不会误挂，但把 gapScale 拉平一定挂。
+  const multi = []
+  for (let i = 0; i < api.ORB_PATTERNS.length; i++) {
+    const p = api.ORB_PATTERNS[i]
+    if (p.offs.length < 2) continue
+    let w = 0
+    for (let j = 0; j + 1 < p.offs.length; j++) w = Math.max(w, Math.abs(p.offs[j + 1] - p.offs[j]))
+    multi.push({ id: p.id, worst: w, gs: p.gapScale || 1 })
+  }
+  multi.sort(function (a, b) { return a.worst - b.worst })
+  let monotone = true, hiGs = 0
+  for (let i = 0; i < multi.length; i++) {
+    if (multi[i].gs < hiGs - 1e-9) monotone = false
+    hiGs = Math.max(hiGs, multi[i].gs)
+  }
+  ok('O5c ★★ 跨度越大 → gapScale 越大（单调；缺了它大跨度串走不完）',
+    monotone && multi[multi.length - 1].gs > multi[0].gs,
+    multi.map(function (r) { return r.id + ' ' + r.worst.toFixed(2) + '×hw→gs' + r.gs.toFixed(2) }).join(' | '))
 
   // --- O6 ★★ 实测跨度：直接驱动生成器，统计**相邻块**的横向差 ---
   // 这是本次改动最核心的指标：不是"有没有块"，而是"块有没有逼玩家动脖子"。
@@ -899,9 +966,58 @@ api.S.rangeIdx = 1
   ok('O6 ★★ 相邻块平均跨度足够大（真的需要横移，不是象征性偏移）',
     avg >= 0.35,
     '平均 ' + avg.toFixed(2) + '×hw ≈ ' + (avg * CFGX.TUN_HW_MAX).toFixed(2) + ' 世界单位（' + cnt + ' 次相邻）')
-  ok('O7 ★ 最坏相邻跨度也在机动能力内',
-    mx * CFGX.TUN_HW_MAX < CFGX.ROLL_XRANGE,
-    '最坏 ' + (mx * CFGX.TUN_HW_MAX).toFixed(2) + ' < ' + CFGX.ROLL_XRANGE)
+  ok('O7b ★ 最坏相邻跨度不超过飞船总行程（左右极限之差 = 2×ROLL_XRANGE）',
+    mx * CFGX.TUN_HW_MAX < CFGX.ROLL_XRANGE * 2 * 0.85,
+    '最坏 ' + (mx * CFGX.TUN_HW_MAX).toFixed(2) + ' < ' + (CFGX.ROLL_XRANGE * 2 * 0.85).toFixed(2))
+
+  // --- O7 ★★ 能量块必须落在飞船「够得到」的范围 ---
+  // v6 修正：旧断言 `mx×TUN_HW_MAX < ROLL_XRANGE` 有两个毛病 ——
+  //   ① 量纲不对：跨度（两端之差）拿去和 XRANGE（中心到边缘）比；
+  //   ② 完全没算中心线偏移 cx：cx 荡到 ±TUN_X_LIMIT(0.85) 时，同侧贴边块会落在
+  //      cx + off×hw = 0.85 + 0.88×0.66 = 1.43，而飞船软限位只有 X_LIMIT(1.25) → 永远吃不到。
+  // 所以改用**真实世界推进**取样（静态生成时 tunnelAt 拿到的 cx 不是真实值）。
+  resetRun()
+  let maxWx = 0, orbFrames = 0
+  for (let i = 0; i < 1500; i++) {
+    gt.invulnUntil = clock + 1e9
+    gt.wx = api.tunnelAt(api.CFG.SHIP_Z).cx        // 贴中线，避免撞墙干扰
+    api.updateWorld(1 / 60); api.updateOrbs(1 / 60)
+    clock += 16
+    for (let k = 0; k < gt.orbs.length; k++) {
+      const a = Math.abs(gt.orbs[k].wx)
+      if (a > maxWx) maxWx = a
+      orbFrames++
+    }
+  }
+  const reach = CFGX.X_LIMIT - CFGX.ORB_CATCH
+  ok('O7 ★★ 能量块都落在飞船可达范围内（够得到，不是摆设）',
+    maxWx <= reach + 1e-6,
+    '最远 |wx|=' + maxWx.toFixed(2) + ' / 可达上限 ' + reach.toFixed(2) +
+    '（X_LIMIT=' + CFGX.X_LIMIT + '，取到 ' + orbFrames + ' 个块帧）')
+
+  // --- O7e ★ 串间换向补偿：跨中线的间隙必须比不跨的更长 ---
+  // 上一串收在左壁、下一串开头在右壁时，最坏跨度约 1.05 世界单位（≈45° 头摆）——
+  // 半个基拍（0.26s）根本甩不过来，所以 spawnOrbWave 对 cross 情况给 1.4 倍喘息。
+  // ⚠️ 直接读生成器暴露的 lastGapUnits（串间**纯间隙**），不从 orbs 反推 ——
+  //    后者混入上一串的串内节拍（gapScale 随机），信噪比太低，实测比值只有 1.02。
+  resetRun()
+  const gt2 = api.S.g
+  const tt2 = gt2.tunnel
+  const savedOrbs2 = gt2.orbs
+  gt2.orbs = []
+  const crossGaps = [], sameGaps = []
+  let zz2 = 0
+  for (let i = 0; i < 500; i++) {
+    zz2 = api.spawnOrbWave(zz2)
+    if (tt2.lastCross) crossGaps.push(tt2.lastGapUnits); else sameGaps.push(tt2.lastGapUnits)
+  }
+  gt2.orbs = savedOrbs2
+  const avgC = crossGaps.reduce(function (a, b) { return a + b }, 0) / Math.max(1, crossGaps.length)
+  const avgS = sameGaps.reduce(function (a, b) { return a + b }, 0) / Math.max(1, sameGaps.length)
+  ok('O7e ★ 跨中线时串间留更多换向时间（cross 间隙 ≈ 2.8× 同侧）',
+    crossGaps.length > 20 && sameGaps.length > 20 && avgC > avgS * 2.2,
+    'cross ' + avgC.toFixed(2) + ' 单位(n=' + crossGaps.length + ') vs 同侧 ' +
+    avgS.toFixed(2) + ' 单位(n=' + sameGaps.length + ')，比值 ' + (avgC / avgS).toFixed(2))
 
   // --- O7b ★ 视野占用：一串不能撑满整个视野（否则屏幕上只会有孤零零一个块）---
   const viewDepth = CFGX.ORB_VIEW - (-6)            // 可见纵深区间
@@ -1079,8 +1195,8 @@ function orbCross(orbWx, shipWx) {
   g.parts = []
   g.wx = 5; g.invulnUntil = 0
   api.updateWorld(1 / 60)
-  ok('P4 蹭壁产生粒子（红色 —— 与奖励用的青色区分开）',
-    g.parts.length > 0 && g.parts[0].color === '#ff6b6b',
+  ok('P4 蹭壁产生粒子（惩罚色 —— 与奖励色明确区分）',
+    g.parts.length > 0 && g.parts[0].color === api.C.bad && api.C.bad !== api.C.orb,
     'parts=' + g.parts.length + ' color=' + (g.parts[0] && g.parts[0].color))
 
   resetRun()
@@ -1089,8 +1205,8 @@ function orbCross(orbWx, shipWx) {
   const oP = { zt: g.tunnel.scroll + api.CFG.SHIP_Z - 1, wx: 0, off: 0.7, taken: false, pz: 1, spin: 0 }
   g.orbs.push(oP)
   api.updateOrbs(1 / 60)
-  ok('P5 吃到块也产生粒子（青色）',
-    g.parts.length > 0 && g.parts[0].color === '#5ef0d8',
+  ok('P5 吃到块也产生粒子（奖励色 = 花粉金）',
+    g.parts.length > 0 && g.parts[0].color === api.C.orb,
     'parts=' + g.parts.length + ' color=' + (g.parts[0] && g.parts[0].color))
 }
 
@@ -1242,9 +1358,228 @@ function orbCross(orbWx, shipWx) {
   ok('R4 环境恢复后能重新启用音效', api.S.audio === 'on', 'audio=' + api.S.audio)
 }
 
+/* ==================== S. ★ v7 居中连乘（Center Multiplier） ==================== */
+// 需求（用户原话）：「没有感觉到保持在中线的变化」→ 把「居中」升级为得分系数：
+//   保持越久系数越高、离开清零、飞机加光球特效。
+// 这一段守三条：① 攒升线性且有上限 ② **宽限窗口**真的在保护「短冲吃块」
+//              ③ 倍率真的乘到了分（含块分），不是摆设
+{
+  // 直接把飞船按在中线上（或推离），喂 updateMult
+  function driveMult(cent, sec) {
+    const g = api.S.g
+    const dtM = 1 / 60
+    const n = Math.max(1, Math.round(sec / dtM))
+    for (let i = 0; i < n; i++) { g.cent = cent; api.updateMult(dtM) }
+    return g
+  }
+
+  api.startRun()
+  const gm = api.S.g
+  const CM = api.CFG
+  ok('S1 开局倍率 = ×1（不残留上一局）',
+    Math.abs(gm.mult - 1) < 1e-6 && gm.multHold === 0,
+    'mult=' + gm.mult + ' hold=' + gm.multHold)
+
+  const expect3 = 1 + (3 / CM.MULT_RAMP_SEC) * (CM.MULT_MAX - 1)
+  driveMult(0.9, 3.0)
+  ok('S2 居中 3 秒 → 倍率线性上升（≈ 一半量程）',
+    Math.abs(gm.mult - expect3) < 0.25,
+    '3s 后 ×' + gm.mult.toFixed(2) + '（线性预期 ×' + expect3.toFixed(2) + '）')
+
+  driveMult(0.9, 6.0)
+  ok('S3 ★ 持续居中 → 倍率封顶于 MULT_MAX（不溢出）',
+    Math.abs(gm.mult - CM.MULT_MAX) < 1e-6,
+    'mult=×' + gm.mult.toFixed(2) + ' 上限=' + CM.MULT_MAX)
+
+  // ★★ 宽限窗口：短冲不清零（这条直接保护 P0 能量块）
+  const beforeGrace = gm.mult
+  driveMult(0.20, CM.MULT_GRACE_SEC * 0.6)
+  ok('S4 ★★ 短暂脱离（< 宽限）→ 倍率不清零（保护「短冲吃块」）',
+    Math.abs(gm.mult - beforeGrace) < 1e-6 && gm.mult > CM.MULT_MAX * 0.9,
+    '脱离 ' + (CM.MULT_GRACE_SEC * 0.6).toFixed(2) + 's 仍 ×' + gm.mult.toFixed(2) +
+    '（宽限 ' + CM.MULT_GRACE_SEC + 's）')
+
+  driveMult(0.20, CM.MULT_GRACE_SEC * 1.6)
+  ok('S5 ★★ 持续脱离（> 宽限）→ 倍率清零回 ×1',
+    Math.abs(gm.mult - 1) < 1e-6, 'mult=×' + gm.mult.toFixed(3))
+
+  driveMult(0.9, 1.5)
+  ok('S6 清零后重新居中 → 从 ×1 重新攒（不接着旧进度）',
+    gm.mult > 1 && gm.mult < 2.2, '×' + gm.mult.toFixed(2))
+
+  // ★ 撞管壁立刻清零（不给宽限）
+  api.startRun()
+  driveMult(0.9, 6.0)
+  const beforeHit = api.S.g.mult
+  api.S.g.wx = 99
+  api.S.g.invulnUntil = 0
+  api.updateWorld(1 / 60)
+  ok('S7 ★ 撞管壁 → 倍率立刻清零（不给宽限，惩罚要干脆）',
+    beforeHit > CM.MULT_MAX * 0.9 && Math.abs(api.S.g.mult - 1) < 1e-6,
+    '撞前 ×' + beforeHit.toFixed(2) + ' → 撞后 ×' + api.S.g.mult.toFixed(3))
+
+  // ★★ 倍率乘到了块分
+  api.startRun()
+  const g8 = api.S.g
+  g8.mult = 1
+  const b0 = g8.score
+  api.takeOrb({ wx: 0, zt: 0, off: 0.5, taken: false, pz: 1, spin: 0 })
+  const addAt1 = g8.score - b0
+  api.startRun()
+  const g8b = api.S.g
+  g8b.mult = 3
+  const b1 = g8b.score
+  api.takeOrb({ wx: 0, zt: 0, off: 0.5, taken: false, pz: 1, spin: 0 })
+  const addAt3 = g8b.score - b1
+  ok('S8 ★★ 块分 × 居中倍率（×3 时拿到的分是 ×1 的 3 倍）',
+    addAt1 > 0 && Math.abs(addAt3 / addAt1 - 3) < 0.05,
+    '×1 → ' + addAt1.toFixed(0) + ' 分 · ×3 → ' + addAt3.toFixed(0) +
+    ' 分（比值 ' + (addAt3 / addAt1).toFixed(2) + '）')
+
+  // ★ 存活分同样被倍率放大（每帧钉住 multHold → updateMult 算出稳定倍率，隔离攒升过程）
+  api.startRun()
+  const g9 = api.S.g
+  function scoreRate(hold) {
+    let acc = 0
+    for (let i = 0; i < 60; i++) {
+      g9.invulnUntil = Date.now() + 1e9
+      g9.multHold = hold            // ★ 钉住倍率进度
+      g9.multTier = 99              // 抑制跨档脉冲（与本次断言无关）
+      g9.wx = api.tunnelAt(api.CFG.SHIP_Z).cx
+      const a = g9.score
+      api.updateWorld(1 / 60)
+      acc += g9.score - a
+    }
+    return acc
+  }
+  const rate1 = scoreRate(0)
+  const rateMax = scoreRate(CM.MULT_RAMP_SEC)
+  ok('S9 ★ 存活分同样被倍率放大（满倍率时增速约 5 倍）',
+    rate1 > 0 && Math.abs(rateMax / rate1 - CM.MULT_MAX) < 0.35,
+    '×1 每秒 ' + rate1.toFixed(1) + ' 分 · ×' + CM.MULT_MAX + ' 每秒 ' + rateMax.toFixed(1) +
+    ' 分（比值 ' + (rateMax / rate1).toFixed(2) + '）')
+
+  // ★ 跨档脉冲（只在跨档触发一次，不是每帧都闪）
+  api.startRun()
+  api.S.g.multPop = 0
+  api.S.g.multTier = 1
+  driveMult(0.9, 0.01)
+  const popIdle = api.S.g.multPop
+  driveMult(0.9, CM.MULT_RAMP_SEC / (CM.MULT_MAX - 1) * 1.2)
+  ok('S10 ★ 跨档才脉冲（未跨档不闪、跨档闪一次）',
+    popIdle <= 0.01 && api.S.g.multPop > 0.9,
+    '未跨档 multPop=' + popIdle.toFixed(2) + ' → 跨档 multPop=' + api.S.g.multPop.toFixed(2))
+
+  // ★ 最高倍率被记录（结算展示）
+  api.startRun()
+  driveMult(0.9, 6.0)
+  ok('S11 记录本局最高倍率（结算展示用）',
+    Math.abs(api.S.g.multBest - CM.MULT_MAX) < 1e-6,
+    'multBest=×' + api.S.g.multBest.toFixed(2))
+
+  // 光球配色：低档冷青 → 满档近纯白
+  // ★ 为什么不是"低冷高暖"：金色已被花粉球（P0 主收益物）占用，倍率环若也偏暖 → 玩家
+  //   分不清"我在攒倍率"还是"前面有花粉"。所以满档改为**靠亮度**（近纯白）而非色相表达。
+  const cLow = api.multColor(1.2)
+  const cHi = api.multColor(CM.MULT_MAX)
+  const rgb = function (h) { return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)] }
+  const lo = rgb(cLow), hi = rgb(cHi)
+  const sumLo = lo[0] + lo[1] + lo[2], sumHi = hi[0] + hi[1] + hi[2]
+  const loCold = lo[0] < lo[1] - 20 && lo[0] < lo[2] - 10      // 低档：R 明显偏低 = 冷
+  const hiWhite = Math.min(hi[0], hi[1], hi[2]) >= 235 &&
+    (Math.max(hi[0], hi[1], hi[2]) - Math.min(hi[0], hi[1], hi[2])) <= 20   // 满档：近纯白
+  ok('S12 光球配色：低档冷青 → 满档近纯白（用亮度而非色相表达充能）',
+    cLow !== cHi && loCold && hiWhite && (sumHi > sumLo), '低 ' + cLow + ' → 满 ' + cHi)
+
+  // 开关可整体回退
+  const savedOn = CM.MULT_ON
+  CM.MULT_ON = false
+  driveMult(0.9, 3.0)
+  ok('S13 MULT_ON=false → 倍率恒为 ×1（机制可整体回退）',
+    Math.abs(api.S.g.mult - 1) < 1e-6, 'mult=×' + api.S.g.mult)
+  CM.MULT_ON = savedOn
+
+  // 高倍率下渲染路径无异常（光球 + 碎裂特效）
+  api.startRun()
+  api.S.g.mult = 4.2
+  api.S.g.multPop = 0.5
+  api.S.g.multLost = 0.6
+  let e14 = ''
+  try { api.render() } catch (e) { e14 = String(e && e.message) }
+  ok('S14 高倍率下整帧渲染无异常（光球 / 碎裂特效路径）', e14 === '', e14)
+}
+
+/* ============ T. ★ v8 金龟子翅膀（倍率驱动）/ 尾焰 / 屏幕常亮 ============ */
+// 需求（用户原话 2026-10-10）：
+//   ① 「平时飞行就是闭合翅膀的状态，倍率到一定级别翅膀就展开，同时有光晕」
+//   ② 「屁股后面三条像尾焰的东西太难看，改成动态好看的」
+//   ③ 「玩一段时间屏幕会变暗 → 关掉游戏时的息屏」
+{
+  const CM2 = api.CFG
+  // 把翅膀收敛到某个倍率对应的开合量（drawShip 内部按倍率缓动 wingOpen）
+  function wingAt(m) {
+    const g2 = api.S.g
+    g2.boosting = false
+    g2.mult = m
+    for (let i = 0; i < 90; i++) api.drawShip(0.05)
+    return api.wingOpen
+  }
+
+  api.startRun()
+  const wClosed = wingAt(1)
+  ok('T1 倍率 ×1 → 鞘翅闭合（巡航态；不再像上一版常态就张翅）',
+    wClosed < 0.08, 'wingOpen=' + wClosed.toFixed(3))
+
+  const wFull = wingAt(CM2.MULT_MAX)
+  ok('T2 满倍率 → 鞘翅全展（充能到位才张开，58° 量级）',
+    wFull > 0.95, 'wingOpen=' + wFull.toFixed(3))
+
+  const wBelow = wingAt(CM2.WING_OPEN_MULT - 0.05)
+  const wAbove = wingAt(CM2.WING_OPEN_MULT + 0.60)
+  ok('T3 只有跨过 WING_OPEN_MULT 才张开（阈值生效且单调：低→闭合，高→渐开）',
+    wBelow <= 0.08 && wAbove > wBelow + 0.10,
+    '×' + (CM2.WING_OPEN_MULT - 0.05).toFixed(2) + '→' + wBelow.toFixed(3) +
+    '  ×' + (CM2.WING_OPEN_MULT + 0.60).toFixed(2) + '→' + wAbove.toFixed(3))
+
+  ok('T4 闭合态仍留壳缝（不把翅膀参数清零 → 中缝对准辅助线还在）',
+    wClosed > 0.001, 'wingOpen=' + wClosed.toFixed(4))
+
+  // T5：尾焰喷流路径（锥形填充 + 弧）可跑；Boost / 高倍率分支也过一遍
+  let eT = ''
+  try {
+    api.startRun()
+    api.S.g.mult = 3
+    api.drawTrail(100, 500, 20, Date.now(), false)
+    api.drawTrail(100, 500, 20, Date.now(), true)
+  } catch (e) { eT = String(e && e.message) }
+  ok('T5 尾迹喷流绘制无异常（分层锥形 + 鳞粉点，Boost 分支同样安全）', eT === '', eT)
+
+  // T6~T8：屏幕常亮
+  let n0 = screenLog.length
+  api.startRun()
+  ok('T6 开局请求保持屏幕常亮（按场景关掉系统自动息屏）',
+    screenLog.length > n0 && screenLog[screenLog.length - 1] === true,
+    JSON.stringify(screenLog.slice(n0)))
+
+  n0 = screenLog.length
+  api.gameOver()
+  ok('T7 结算还原屏幕常亮（不在结算页白耗电）',
+    screenLog.length > n0 && screenLog[screenLog.length - 1] === false,
+    JSON.stringify(screenLog.slice(n0)))
+
+  for (let i = 0; i < H.hide.length; i++) H.hide[i]()
+  const afterHide = screenLog[screenLog.length - 1]
+  api.startRun()                       // 回前台仍在本局
+  for (let i = 0; i < H.show.length; i++) H.show[i]()
+  const afterShow = screenLog[screenLog.length - 1]
+  ok('T8 退后台还原 / 回前台若在本局则补开常亮',
+    afterHide === false && afterShow === true,
+    'hide→' + afterHide + '  show→' + afterShow)
+}
+
 /* ============================ 汇总 ============================ */
 const fail = A.filter(function (a) { return !a.pass })
-console.log('--- 纵轴 MVP v5（能量块 + 视听反馈 + 暂停）冒烟结果 ---')
+console.log('--- 纵轴 MVP v8（昆虫主题：金龟子翅膀倍率驱动 / 鳞粉尾焰 / 屏幕常亮）冒烟结果 ---')
 for (let i = 0; i < A.length; i++) {
   console.log((A[i].pass ? '  ok  ' : '  FAIL') + '  ' + A[i].name + (A[i].extra ? ('   [' + A[i].extra + ']') : ''))
 }

@@ -43,7 +43,12 @@
 //       · 三档只改"动作量"，**不改最大机动能力**（XRANGE/VMAX 恒定）
 //       · 外推 0.40 → 0.30，减少"提前窜出去"的手感
 //       · 颈椎记账阈值随之抬高（7.5° → 11.5°）：要真歪到位才算一次
-//     档位：紧凑(3°/20°) · 标准(4°/30°) · 舒展(5°/40°)，底部第 2 个按钮切换
+//   · ★ v6 回调敏感度（2026-10-07，用户反馈「对头部运动的角度敏感度太低」）：
+//     30° 那一档过钝 → 标准档满量程 **30° → 25°**、死区 4° → 3.5°；
+//     舒展档 40° → 36°；紧凑档维持 3°/20°（v3 原手感，最灵敏）。
+//     ★ 注意这是钟摆的另一头：幅度档越大越"累脖子"、越小越"跟手"，
+//       两件事此消彼长 —— 别再来回拉，靠三档让用户自己选。
+//     档位：紧凑(3°/20°) · 标准(3.5°/25°) · 舒展(4.2°/36°)，底部第 2 个按钮切换
 //   · 符号约定（两个轴统一）：**轴值 > 0 ⟺ 飞船向右移**。
 //     所以"头向左肩歪 / 向左转头"必须映射成**负**轴值。
 //   · ★ 玩法 = **穿越隧道**（用户 2026-10-07 修正，替代原「5 泳道躲障碍」）：
@@ -84,18 +89,53 @@ try { sys = wx.getSystemInfoSync() || {} } catch (e) { /* ignore */ }
 let menu = null
 try { menu = wx.getMenuButtonBoundingClientRect() } catch (e) { /* ignore */ }
 
+// ================================================================ 色板 · 昆虫主题「晨露草茎」
+// ★ 三层结构（对应《脖动圈_视觉规范_v1_2026-10-10.md》）：
+//   世界层（深林/草茎）· 主体层（金龟子）· 功能层（UI/语义色）
+// ★★ 本主题最大风险：绿甲虫飞在绿隧道 = 糊。靠三重分离解：
+//   ① 隧道壁去饱和（wall）／甲虫保留饱和（ship）  ② 明度拉开（隧道暗 / 甲虫亮）
+//   ③ 甲虫外缘 1px 冷白轮廓光（rim）—— 写实绘画最常用的分离手法，必做
 const C = {
-  bg0: '#05070f', bg1: '#0a0f22',
-  ship: '#5b8cff', shipDark: '#2a4bb0', shipLite: '#cfe0ff',
-  obs: '#ff5a4a', obsEdge: '#ff9d8a',
-  star: '#cfe0ff', speed: '#7fd8ff',
-  trail: '#ffb066',
-  lane: '#1b2545',
-  fg: '#e6ecff', dim: '#7f8fc4',
-  ok: '#4ade80', bad: '#ff6b6b', warn: '#fbbf24', accent: '#7aa2ff',
-  panel: '#0f1630', line: '#243060',
-  // 能量块：青色系，与隧道蓝（#8fb8ff）和 Boost 金（#ffd98a）明确区分 —— 三种颜色三种含义
-  orb: '#5ef0d8', orbGlow: '#2bd4c0', orbCore: '#eafffb'
+  // ---- 世界层：深林 → 草茎通道 ----
+  bg0: '#08120C',        // 最远处深林底
+  bg1: '#0E1A12',        // 林间微光（地平线以上）
+  lane: '#14281C',       // 草茎内部（管道底面）
+  wall: '#4E8A5E',       // 草茎壁（★ 已去饱和，让甲虫能跳出来）
+  wallLit: '#6FA87C',    // 草茎壁亮面 / 肋条
+  wallGlow: '#2C4A36',   // 管壁辉光垫底（粗线用）
+  mid: '#7FD98A',        // 通道中线（露水反光）
+  star: '#CFF0DC',       // 露珠（替代星点）
+  speed: '#D8E8B0',      // 鳞粉速度线
+  // ---- 主体层：金龟子 ----
+  ship: '#7FA83E',       // 鞘翅主色
+  shipDark: '#4A6626',   // 鞘翅暗面 / 鞘翅中缝
+  shipLite: '#C6E08A',   // 鞘翅高光
+  pronotum: '#5F8A2A',   // 前胸背板
+  headC: '#3F5A1E',      // 头部
+  leg: '#3A4E1C',        // 六足
+  antenna: '#C9A227',    // 鳃叶触角（金属金 = 科级标志）
+  rim: '#D8FFE8',        // ★ 轮廓光（冷白，把绿虫从绿底上撕开）
+  wing: '#D8FFE8',       // 膜翅（半透明，用 alpha 控制）
+  spec: '#FFFFFF',       // 镜面高光
+  trail: '#FFD166',      // 尾迹 → 金色鳞粉
+  // ---- 功能层 ----
+  obs: '#E24B4A', obsEdge: '#FF9D8A',
+  fg: '#E8FFF4', dim: '#7F9A86',
+  ok: '#6FCF7A', bad: '#E24B4A', warn: '#FFC98A', accent: '#7FD98A',
+  panel: '#0E1A12', line: '#22402C',
+  boost: '#FFC98A',      // Boost 光效（暖金，偏橙以区别于花粉黄）
+  // 能量块 → 花粉球：全屏唯一的高饱和暖色，一眼可辨
+  orb: '#FFD166', orbGlow: '#E8A838', orbCore: '#FFF6D8'
+}
+// ★ v7 倍率光球配色：**全程冷青白**（越低越冷、越满越白）。
+//   为什么要改冷色：金色已被花粉球占用（P0 的主收益物），倍率环若也用金 → 玩家分不清
+//   "我在攒倍率"还是"前面有一块花粉"。满档不靠色相、靠**纯白 + 加粗环**表达（用亮度分层）。
+function multColor(m) {
+  const t = clamp((m - 1) / (CFG.MULT_MAX - 1), 0, 1)
+  if (t < 0.25) return '#8FD9C8'
+  if (t < 0.50) return '#B6EDDD'
+  if (t < 0.78) return '#DCFAF0'
+  return '#F6FFFC'
 }
 
 // ---------------------------------------------------------------- 配置
@@ -128,10 +168,10 @@ const CFG = {
   CTRL_IDX: 0,            // 控制模式索引（见 CTRL_MODES）：0=歪头·位置
   RANGE_IDX: 1,           // ★【幅度】档索引（见 RANGES）：0=紧凑 1=标准 2=舒展
   ROLL_SIGN: +1,          // ★ 头向右肩歪 → 飞船右移（v4 按真机反馈翻正；若又反了切「歪头·位置反」）
-  ROLL_DEAD: 0.070,       // （基准值，实际由 RANGES 覆盖）
-  ROLL_FULL: 0.524,       // （基准值，实际由 RANGES 覆盖）满量程 30°
-  ROLL_TAU: 0.20,         // roll EMA 时间常数(s)：噪声大 → 比 yaw 平滑一倍以上
-  ROLL_EXTRAP: 0.30,      // roll 速率外推权重（v4：0.40→0.30，减少"提前窜出去"的手感）
+  ROLL_DEAD: 0.061,       // （基准值，实际由 RANGES 覆盖）
+  ROLL_FULL: 0.436,       // （基准值，实际由 RANGES 覆盖）满量程 25°（v6：30°→25°，手感更跟）
+  ROLL_TAU: 0.18,         // roll EMA 时间常数(s)：噪声大 → 比 yaw 平滑一倍以上（v6：0.20→0.18，响应更快）
+  ROLL_EXTRAP: 0.32,      // roll 速率外推权重（v4 降到 0.30；v6 回到 0.32 提高跟手度）
   ROLL_XRANGE: 1.15,      // 位置律：满倾角 → 世界横向 ±1.15（三档恒定，保证最大机动能力不变）
   ROLL_VMAX: 5.5,         // 速度律：满倾角 → 横向速度（世界单位/s）
   TILT_K: 0.55,           // 机身随歪头压倾幅度（纯视觉；与操作同向 = 代入感）
@@ -148,9 +188,9 @@ const CFG = {
   ROLL_K: 0.30,           // （旧字段，保留兼容）
 
   // 颈椎记账阈值（跟随主控轴 + 跟随「幅度」档，见 RANGES）
-  NECK_TH_ROLL: 0.20,     // （基准）歪头计数阈值 ≈11.5°
+  NECK_TH_ROLL: 0.165,    // （基准）歪头计数阈值 ≈9.5°（v6：随满量程 30°→25° 等比下调）
   NECK_TH_YAW: 0.17,      // 转头计数阈值 ≈10°
-  NECK_CALM: 0.091,       // （基准）零点慢速校正的"静息带"（≈死区×1.3，带内输出本来就是 0）
+  NECK_CALM: 0.079,       // （基准）零点慢速校正的"静息带"（≈死区×1.3，带内输出本来就是 0）
 
   PITCH_BOOST: 0.14,      // |pitch| > 8° 触发 Boost（方向待真机确认，先用绝对值）
   BOOST_MAX_MS: 3000,
@@ -186,13 +226,37 @@ const CFG = {
                         //   新串会生成在视野外 19 单位处，第一次 updateOrbs 裁剪就把它们
                         //   删了 —— scroll 追上时那块早没了，屏幕上周期性"断流"。
                         //   冒烟 O15b（空窗帧占比）抓到的就是这个。
-  ORB_OFF_MIN: 0.50,      // 相对隧道半宽的**最小**偏移比例 ← 保证「中线附近没有块」
-  ORB_OFF_MAX: 0.85,      // 最大偏移（0.85×hw + ORB_R 仍 < hw，块不穿出管壁）
+  ORB_OFF_MIN: 0.28,      // 相对隧道半宽的**最小**偏移比例 ← 保证「中线附近没有块」
+                        //   ★ v6：0.50 → 0.28。原来所有 pattern 的 |off| 都在 0.50~0.85，
+                        //   视觉上"块全堆在管壁边上"，玩起来单调。放宽到 0.28 后，
+                        //   块在「中线留空 → 半宽」这段里随机铺开（配合 pattern 表的 jitter）。
+  ORB_OFF_MAX: 0.88,      // 最大偏移（0.88×hw + ORB_R 仍 < hw，块不穿出管壁）
   ORB_CATCH: 0.045,       // 横向判定富余（对玩家友好；0 = 严格贴合）
   ORB_SCORE: 30,          // 基础分（再乘 combo 倍率）
   COMBO_SEC: 2.6,         // 连击保持时间：超时未吃到就归零
   COMBO_CAP: 9,           // 连击倍率上限
-  ROOM_SCORE: 5,          // 居中保底分（原 14 → 5：能量块才是主收益，居中只保底）
+  ROOM_SCORE: 5,          // 居中保底分（原 14 → 5）
+
+  // ---- ★ v7 居中连乘（Center Multiplier）----
+  //  设计意图：把「保持居中」从**静默的保命行为**变成**看得见的收益放大器**。
+  //  病根（v6 体感诊断）：居中链路只有一条几乎不可见的加分（5 分/秒，被无条件的
+  //  存活分淹没），且**中心线在屏幕上根本没被画出来** → 玩家「感觉不到保持中线的变化」。
+  //  解法：贴中线攒倍率，倍率乘**所有**得分（含能量块）。
+  //    → 贴中线 = 投资（攒倍率），够块 = 兑现（基础分 × 倍率）
+  //    → 「安全」与「收益」从竞争关系变成**乘法关系**，不再是两个打架的目标。
+  MULT_ON: true,
+  MULT_MAX: 5,            // 满倍率 ×5
+  MULT_RAMP_SEC: 6,       // 从 ×1 攒到 ×5 需要连续居中的秒数
+  MULT_HOLD_CENT: 0.62,   // 「算居中」的阈值（cent ≥ 该值才推进计时）
+  // ★ 脱离宽限：**必须有** —— 块都刻意偏离中线（ORB_OFF_MIN=0.28），
+  //   若「一离开就清零」，吃任何块都会破倍率 → 玩家永远不敢够块 → P0 被废掉。
+  //   0.7s 的用意：单块/短串能「短冲」吃到而不破倍率；4 块长串（≈1.5s）必然破
+  //   → 串长天然成了取舍表：短串 = 甜点，长串 = 高风险大餐。
+  MULT_GRACE_SEC: 0.7,
+  MULT_TIER: 1.0,         // 每涨满 1.0 倍率 → 光球脉冲 + 上扬音
+  // ★ 翅膀展开阈值（2026-10-10 真机反馈后改）：倍率到 ×2 才开始开翅 ——
+  //   平时巡航鞘翅是**闭合**的，"充能到一定级别才展开"才有仪式感。
+  WING_OPEN_MULT: 2.0,
 
   // ---- P2 视听反馈 ----
   AUDIO_ON: true,
@@ -269,11 +333,21 @@ const S = {
     boostUntil: 0, boostCoolAt: 0, boosting: false,
     hits: 0, cent: 1, centSum: 0, centN: 0,
 
+    // ★ v7 居中连乘
+    mult: 1,          // 当前倍率（1 ~ MULT_MAX）
+    multHold: 0,      // 已连续居中的秒数（攒倍率用）
+    multOut: 0,       // 脱离计时（秒），用于宽限判定
+    multBest: 1,      // 本局最高倍率（结算展示）
+    multTier: 1,      // 上次触发的档位（跨档才脉冲，避免每帧都闪）
+    multPop: 0,       // 脉冲动画进度 1→0（涨满一档）
+    multLost: 0,      // 清零碎裂动画进度 1→0
+
     // ★ P0 能量块
     orbs: [],                 // 视野内的块（世界坐标）
     parts: [],                // 粒子池
     combo: 0, comboT: 0,      // 连击数 / 剩余保持时间(s)
     comboPop: 0,              // 吃到块时的弹出动画进度 1→0
+    comboPopMul: 1,           // ★ v7 弹出时的居中倍率（>1.5 用金色 → "这分是倍率挣来的"）
     comboPopTxt: '',          // 弹出文字（含分数）
     orbFlash: 0,              // 吃块屏幕脉冲（呼吸感，不是震屏）
     took: 0, miss: 0,         // 本局吃到 / 错过（错过不清连击，见 updateOrbs）
@@ -328,21 +402,54 @@ function rnd(a, b) { return a + Math.random() * (b - a) }
 //   降级：基础库 <2.19 / 接口缺失 / 用户关掉 → S.audio='off'，全程静默，玩法不受影响。
 //   ⚠️ iOS 上 WebAudio 需要用户手势后才能出声 → 首次触摸时 resume()（见 onTouchStart）。
 let AC = null
+let audioWhy = ''          // 创建失败原因（诊断用，HUD 可显示）
+
 function initAudio() {
   if (AC !== null) {
     // 已创建：补一次 resume（iOS 首帧常是 suspended，等用户手势）
-    try { if (AC && AC.state === 'suspended' && AC.resume) AC.resume() } catch (e) { /* ignore */ }
+    // ★ 不判 state —— 小游戏的 WebAudioContext 未必暴露该字段，判了反而漏掉真正需要 resume 的情况
+    try { if (AC && AC.resume) AC.resume() } catch (e) { /* ignore */ }
     return AC
   }
   if (!CFG.AUDIO_ON) { AC = false; S.audio = 'off'; return AC }
   try {
-    if (typeof wx.createWebAudioContext !== 'function') throw new Error('no WebAudio')
+    if (typeof wx.createWebAudioContext !== 'function') throw new Error('接口缺失')
     AC = wx.createWebAudioContext()
-    if (!AC || !AC.destination) throw new Error('bad ctx')
-    if (AC.state === 'suspended' && AC.resume) AC.resume()
-    S.audio = 'on'
-  } catch (e) { AC = false; S.audio = 'off' }
+    if (!AC || !AC.destination) throw new Error('创建失败')
+    try { if (AC.resume) AC.resume() } catch (e) { /* ignore */ }
+    S.audio = 'on'; audioWhy = ''
+  } catch (e) { AC = false; S.audio = 'off'; audioWhy = msgOf(e) }
   return AC
+}
+
+// ★★ iOS 音频解锁：AudioContext 必须**在用户手势的同步调用栈里**被唤醒，
+//    且一次 resume 往往不够（首次触摸时 ctx 刚创建，pending 状态要下一拍才生效）。
+//    所以：每次触摸都无条件 resume（幂等），并在首次解锁时播一个极短近乎无声的音，
+//    把音频管线真正"顶"开 —— 这是 iOS WebAudio 的标准解锁姿势。
+//    另外用 setInnerAudioOption 关掉"跟随静音键"，否则 iPhone 侧面开关一拨就全程无声。
+let unlocked = false
+function unlockAudio() {
+  if (!CFG.AUDIO_ON) return
+  // 每次触摸都尝试解除"跟随系统静音键"（首次有效，之后幂等）
+  try {
+    if (wx.setInnerAudioOption) wx.setInnerAudioOption({ obeyMuteSwitch: false, mixWithOther: true })
+  } catch (e) { /* 低版本没有此接口，忽略 */ }
+  const ac = initAudio()
+  if (!ac) return
+  try {
+    if (ac.resume) ac.resume()
+    // 只要状态还没到 running 就继续"顶"（有的机型第一次触摸不够，要两三次）
+    const st = ac.state
+    if (!unlocked || (st && st !== 'running')) {
+      unlocked = true
+      const o = ac.createOscillator()
+      const gn = ac.createGain()
+      gn.gain.value = 0.0001          // 近乎无声，只为激活管线
+      o.connect(gn); gn.connect(ac.destination)
+      o.start(); o.stop(ac.currentTime + 0.02)
+      // 首触摸时不放真实音效（此时可能还没开局），静默激活即可
+    }
+  } catch (e) { /* ignore */ }
 }
 
 // 一个带包络的振荡器音符。sweepTo = 频率滑到哪（做"下滑/上扫"的听感）
@@ -375,6 +482,13 @@ function sfxHit() { tone(190, 0.22, 'sawtooth', 0.20, 65) }
 function sfxBoost() { tone(280, 0.30, 'sawtooth', 0.10, 1000) }
 function sfxStart() { tone(440, 0.10, 'triangle', 0.13); tone(660, 0.16, 'triangle', 0.11, 660, 0.09) }
 function sfxOver() { tone(420, 0.28, 'triangle', 0.15, 170) }
+// ★ v7 居中倍率音效：升档 = 上行音（档位越高越亮，正反馈"我在变强"）；
+//   破倍率 = 短促下滑音（"泄气"，和撞墙的重低音区分开 —— 撞墙是惩罚，破倍率只是损失）
+function sfxMultUp(tier) {
+  const b = 300 + tier * 75
+  tone(b, 0.09, 'triangle', 0.09, b * 1.7)
+}
+function sfxMultLost() { tone(360, 0.16, 'sine', 0.11, 160) }
 
 // ---------------------------------------------------------------- 投影
 function project(wx, wz) {
@@ -681,10 +795,13 @@ const ctl = { f: 0, prev: 0, vel: 0, smooth: 0 }
 // 三档**只改动作量，不改最大机动能力**：xrange / vmax 恒定 1.15 / 5.5，
 // 所以切档不会让你"够不着弯道"，只会让你"多动脖子"。
 //   neck = 颈椎记账阈值（要真歪到位才计一次）；calm = 零点校正静息带（≈死区×1.3）
+// ★ v6 回调（用户反馈「角度敏感度太低」）：标准档 30°→25°、舒展档 40°→36°，
+//   紧凑档维持 20°。这是"累脖子 ↔ 跟手"钟摆的另一头 —— 三档并存，让用户自己选，
+//   别再拿默认档来回拉。
 const RANGES = [
-  { id: 'tight', dead: 0.052, full: 0.349, neck: 0.14, calm: 0.068, label: '紧凑' }, // 3° / 20°（原手感）
-  { id: 'std',   dead: 0.070, full: 0.524, neck: 0.20, calm: 0.091, label: '标准' }, // 4° / 30° ★默认
-  { id: 'wide',  dead: 0.087, full: 0.698, neck: 0.26, calm: 0.113, label: '舒展' }  // 5° / 40°（颈部大幅运动）
+  { id: 'tight', dead: 0.052, full: 0.349, neck: 0.130, calm: 0.068, label: '紧凑' }, // 3.0° / 20°（最灵敏）
+  { id: 'std',   dead: 0.061, full: 0.436, neck: 0.165, calm: 0.079, label: '标准' }, // 3.5° / 25° ★默认（v6：30°→25°）
+  { id: 'wide',  dead: 0.073, full: 0.628, neck: 0.215, calm: 0.095, label: '舒展' }  // 4.2° / 36°（v6：40°→36°）
 ]
 function curRange() { return RANGES[clamp(S.rangeIdx | 0, 0, RANGES.length - 1)] }
 
@@ -853,6 +970,9 @@ function initTunnel() {
   while (t.pts[t.pts.length - 1].zt < CFG.SHIP_Z + CFG.TUN_FWD) pushTunnelPt()
   // 开局留 16 单位空档再出块：先让玩家熟悉歪头控船，别一上来就要够两侧
   t.nextOrbZ = CFG.SHIP_Z + 16
+  t.lastOrbOff = 0        // ★ 串间换向补偿用：上一串末块的偏移
+  t.lastCross = false     // ★ 本次串间是否跨中线（诊断/冒烟可观测）
+  t.lastGapUnits = 0      // ★ 本次串间实际留了多少世界单位
 }
 
 // 取「相对纵深 zr」处的隧道参数（相邻控制点线性插值）
@@ -891,13 +1011,18 @@ function tunnelAt(zr) {
 const ORB_PATTERNS = [
   // offs = 相对隧道半宽的比例，正=右。w(d) = 随难度 0→1 的抽取权重
   // gapScale = ★ 节拍倍率：跨度越大，块间给的时间越多（见上文红线③）
-  { id: 'sweepR', offs: [0.50, 0.66, 0.79, 0.85], gapScale: 1.00, w: function (d) { return 0.18 + d * 0.24 } },
-  { id: 'sweepL', offs: [-0.50, -0.66, -0.79, -0.85], gapScale: 1.00, w: function (d) { return 0.18 + d * 0.24 } },
-  { id: 'wave',   offs: [-0.85, -0.50, 0.50, 0.85], gapScale: 1.30, w: function (d) { return 0.04 + d * 0.28 } },
-  { id: 'zig',    offs: [-0.78, 0.78, -0.78], gapScale: 1.50, w: function (d) { return d * 0.30 } },
-  { id: 'edgeR',  offs: [0.72], gapScale: 1.00, w: function (d) { return 0.30 - d * 0.10 } },
-  { id: 'edgeL',  offs: [-0.72], gapScale: 1.00, w: function (d) { return 0.30 - d * 0.10 } },
-  { id: 'near',   offs: [0.50], gapScale: 1.00, w: function (d) { return 0.16 - d * 0.13 } }  // 喘息：只轻微偏移
+  // jitter   = ★ 位置随机抖动（v6 新增）：让"同一个 pattern"每一串也落在不同距离上。
+  //            取值已保证 offs ± jitter 落在 [ORB_OFF_MIN, ORB_OFF_MAX] 内，不靠 clamp 兜。
+  //  ⚠️ 大跨度的串（zig / wave / sweep）**不加 jitter** —— 那会破坏红线③的跨度预算。
+  { id: 'sweepR',  offs: [0.30, 0.47, 0.66, 0.86], gapScale: 1.15, w: function (d) { return 0.16 + d * 0.24 } },
+  { id: 'sweepL',  offs: [-0.30, -0.47, -0.66, -0.86], gapScale: 1.15, w: function (d) { return 0.16 + d * 0.24 } },
+  { id: 'wave',    offs: [-0.86, -0.46, 0.46, 0.86], gapScale: 1.35, w: function (d) { return 0.04 + d * 0.26 } },
+  { id: 'zig',     offs: [-0.74, 0.74, -0.74], gapScale: 1.50, w: function (d) { return d * 0.28 } },
+  { id: 'scatter', offs: [0.42, 0.62, 0.46, 0.74], jitter: 0.14, gapScale: 1.20, w: function (d) { return 0.10 + d * 0.16 } },
+  { id: 'edgeR',   offs: [0.72], jitter: 0.16, gapScale: 1.00, w: function (d) { return 0.13 - d * 0.06 } },
+  { id: 'edgeL',   offs: [-0.72], jitter: 0.16, gapScale: 1.00, w: function (d) { return 0.13 - d * 0.06 } },
+  { id: 'rand',    offs: [0.58], jitter: 0.30, gapScale: 1.00, w: function (d) { return 0.26 } },  // ★ 全区间随机距离（"随机分布"主力）
+  { id: 'near',    offs: [0.36], jitter: 0.08, gapScale: 1.00, w: function (d) { return 0.14 - d * 0.08 } }  // 喘息：轻微偏移
 ]
 
 function pickOrbPattern() {
@@ -926,22 +1051,40 @@ function spawnOrbWave(z0) {
   const flip = Math.random() < 0.5 ? 1 : -1     // 镜像：同一 pattern 也有左右两种走向
   const base = orbGapUnits()
   const gap = base * (p.gapScale || 1)          // ★ 跨度大的串给更长节拍（红线③）
+  const jit = p.jitter || 0                     // ★ v6：位置随机抖动（只有单块/散布串带）
   const n = p.offs.length
 
   for (let i = 0; i < n; i++) {
     const z = z0 + i * gap
     const at = tunnelAt(z - t.scroll)
     const hw = Math.max(0.20, at.hw)
-    let off = clamp(p.offs[i] * flip, -CFG.ORB_OFF_MAX, CFG.ORB_OFF_MAX)
-    // 兜底：保证「中线附近没有块」（pattern 表里最内是 0.50，这条是防御性的）
+    let off = p.offs[i] * flip
+    if (jit) off += (Math.random() * 2 - 1) * jit   // ★ 每次生成都不一样 → 不再永远贴在同一个距离
+    off = clamp(off, -CFG.ORB_OFF_MAX, CFG.ORB_OFF_MAX)
+    // 兜底：保证「中线附近没有块」（pattern 表的取值已避开这条，这里是防御性的）
     if (Math.abs(off) < CFG.ORB_OFF_MIN) off = (off < 0 ? -1 : 1) * CFG.ORB_OFF_MIN
+    // ★★ v6 修 bug：块的世界坐标 = cx + off×hw，但中心线荡到一侧时，同侧贴边块会跑到
+    //    飞船够不到的地方（cx=0.85、off=0.88、hw=0.66 → 1.43 > X_LIMIT 1.25，永远吃不到）。
+    //    解法：块按「它这一侧还剩多少空间」自适应收敛半径 —— 弯道处块自然靠内，但至少吃得到。
+    const maxOut = CFG.X_LIMIT - CFG.ORB_CATCH - CFG.ORB_R
+    const room = off > 0 ? (maxOut - at.cx) : (maxOut + at.cx)
+    const usable = clamp(Math.min(hw, room / Math.max(0.01, Math.abs(off))), 0.12, hw)
     g.orbs.push({
-      zt: z, wx: at.cx + off * hw, off: off, gapScale: p.gapScale || 1,
+      zt: z, wx: at.cx + off * usable, off: off, gapScale: p.gapScale || 1,
       taken: false, pz: NaN, spin: Math.random() * Math.PI * 2
     })
   }
-  // 串与串之间留半个基拍的喘息 —— 这点张弛就是 P1「张弛节拍」的雏形
-  return z0 + n * gap + base * 0.5
+  // 串与串之间的喘息 —— 这点张弛就是 P1「张弛节拍」的雏形。
+  // ★ 换向补偿（v6）：上一串收在左壁、这一串开头在右壁时，半个基拍不够**人**换向
+  //   （飞船机动够，但"头从左边甩到右边"要时间）。跨中线就多给半个基拍。
+  const firstOff = g.orbs.length >= n ? g.orbs[g.orbs.length - n].off : 0
+  const prevOff = t.lastOrbOff || 0
+  const cross = (prevOff > 0.2 && firstOff < -0.2) || (prevOff < -0.2 && firstOff > 0.2)
+  t.lastOrbOff = g.orbs.length ? g.orbs[g.orbs.length - 1].off : 0
+  // 跨中线时最坏跨度约 1.05 世界单位（≈45° 头摆），半个基拍根本甩不过来 → 给 1.4 倍
+  t.lastCross = cross
+  t.lastGapUnits = base * (cross ? 1.4 : 0.5)
+  return z0 + n * gap + t.lastGapUnits
 }
 
 // 在隧道前方补足块（只在控制点已经铺好后调用，否则 tunnelAt 取不到正确的 cx/hw）
@@ -961,10 +1104,12 @@ function takeOrb(o) {
   g.combo++
   g.comboT = CFG.COMBO_SEC
   const mul = Math.min(g.combo, CFG.COMBO_CAP)
-  const add = CFG.ORB_SCORE * mul
+  // ★ v7：块分 = 基础 × 连击 × **居中倍率** —— 先把倍率攒起来再吃块，"兑现"才有意义
+  const add = CFG.ORB_SCORE * mul * g.mult
   g.score += add
   g.took++
   g.comboPop = 1
+  g.comboPopMul = g.mult
   g.comboPopTxt = '+' + Math.round(add) + (mul > 1 ? ' ×' + mul : '')
   g.orbFlash = 1
   g.offSum += Math.abs(o.off); g.offN++
@@ -1040,6 +1185,32 @@ function updateParts(dt) {
   g.parts = keep
 }
 
+// ★ v7 居中连乘：核心状态推进
+//   holding = 当前是否「算居中」（cent ≥ MULT_HOLD_CENT）
+//     · holding  ：计时增长 → 倍率线性抬升；跨过整数档位时脉冲 + 上扬音
+//     · 非 holding：**宽限期内冻结**（不清零、不增长）；超时才清零
+//   ★ 宽限是「暂停计时」而不是「立刻归零」—— 因为块都刻意偏离中线（ORB_OFF_MIN=0.28），
+//     若一离开就清零，吃任何块都会破倍率，P0 能量块会被这套机制废掉。
+function updateMult(dt) {
+  const g = S.g
+  if (!CFG.MULT_ON) { g.mult = 1; return }
+  if (g.cent >= CFG.MULT_HOLD_CENT) {
+    g.multOut = 0
+    g.multHold += dt
+    const t01 = clamp(g.multHold / CFG.MULT_RAMP_SEC, 0, 1)
+    g.mult = 1 + t01 * (CFG.MULT_MAX - 1)
+    const tier = Math.floor(g.mult + 1e-6)
+    if (tier > g.multTier) { g.multTier = tier; g.multPop = 1; sfxMultUp(tier) }
+    if (g.mult > g.multBest) g.multBest = g.mult
+  } else {
+    g.multOut += dt
+    if (g.multOut > CFG.MULT_GRACE_SEC) {
+      if (g.mult > 1.02) { g.multLost = 1; sfxMultLost() }
+      g.mult = 1; g.multHold = 0; g.multTier = 1
+    }
+  }
+}
+
 function updateWorld(dt) {
   const g = S.g
   const t = g.tunnel
@@ -1065,6 +1236,9 @@ function updateWorld(dt) {
   g.cent = clamp(1 - Math.abs(d) / Math.max(0.01, at.hw), 0, 1)
   g.centSum += g.cent; g.centN++
 
+  // ★ v7 居中连乘：贴中线攒倍率，脱离超宽限清零（见 updateMult）
+  updateMult(dt)
+
   if (Math.abs(d) > gap) {
     if (now > g.invulnUntil) {
       g.lives--
@@ -1076,6 +1250,9 @@ function updateWorld(dt) {
       // ★ 蹭壁才断连击（错过块不断）—— 惩罚只留给"撞墙"，因为未吃到块
       //   很可能是玩家主动放弃（用放弃收益换安全），不该倒扣。
       g.combo = 0; g.comboT = 0
+      // ★ v7 撞管壁 = 最硬的「脱离中线」→ 倍率**直接清零**（不给宽限，惩罚要干脆）
+      if (g.mult > 1.02) { g.multLost = 1; sfxMultLost() }
+      g.mult = 1; g.multHold = 0; g.multOut = 0; g.multTier = 1
       burst(at.cx + (d > 0 ? 1 : -1) * at.hw, t.scroll + CFG.SHIP_Z, C.bad, 7)
       sfxHit()
       if (g.lives <= 0) gameOver()
@@ -1084,13 +1261,16 @@ function updateWorld(dt) {
     g.wx = clamp(at.cx + (d > 0 ? 1 : -1) * gap * 0.45, -CFG.X_LIMIT, CFG.X_LIMIT)
   }
 
-  // 计分：存活 + 居中保底（★ 14 → CFG.ROOM_SCORE：能量块才是主收益，
-  // 否则"贴中线"和"去够块"两个目标会互相打架）
+  // 计分：存活 + 居中保底，**再乘居中倍率**（★ v7）
+  // 倍率乘一切 → 「贴中线」从"没分"变成"让所有收益翻倍"——这是它唯一的、也足够强的价值。
   g.t += dt
-  g.score += g.speed * dt * 0.5
-  g.score += g.cent * CFG.ROOM_SCORE * dt
+  g.score += (g.speed * 0.5 + g.cent * CFG.ROOM_SCORE) * g.mult * dt
   // 显示分数缓动追真实分数：吃块时数字会"跳"一下，静态数字没有反馈感
   g.scoreShow += (g.score - g.scoreShow) * Math.min(1, dt * 8)
+
+  // ★ v7 倍率动画衰减
+  if (g.multPop > 0) g.multPop = Math.max(0, g.multPop - dt * 2.2)
+  if (g.multLost > 0) g.multLost = Math.max(0, g.multLost - dt * 1.8)
 
   g.shake = Math.max(0, g.shake - dt * 3)
   g.flash = Math.max(0, g.flash - dt * 2.5)
@@ -1130,6 +1310,13 @@ function updateFx(dt) {
 }
 
 // ---------------------------------------------------------------- 状态机
+// ★ 保持屏幕常亮（2026-10-10 真机反馈：玩一会儿屏幕自动变暗/被系统息屏）。
+//   小游戏里系统"自动锁屏/省电"会打断游戏 → 用官方 API 在**本局进行中**请求常亮。
+//   策略：开局开、结算/退后台还原（不做全局常亮，免得挂着不动时白耗电）。
+function setKeepScreen(on) {
+  try { if (wx.setKeepScreenOn) wx.setKeepScreenOn({ keepScreenOn: !!on }) } catch (e) { /* 平台不支持就静默 */ }
+}
+
 function startRun() {
   const g = S.g
   g.wx = 0; g.tgt = 0; g.tilt = 0
@@ -1139,6 +1326,9 @@ function startRun() {
   g.shake = 0; g.flash = 0; g.hitFlash = 0
   g.boostUntil = 0; g.boostCoolAt = 0; g.boosting = false
   g.hits = 0; g.cent = 1; g.centSum = 0; g.centN = 0
+  g.mult = 1; g.multHold = 0; g.multOut = 0; g.multBest = 1
+  g.multTier = 1; g.multPop = 0; g.multLost = 0
+  g.comboPopMul = 1
   g.dead = false
   // P0/P2 状态复位
   g.orbs = []; g.parts = []
@@ -1156,6 +1346,7 @@ function startRun() {
   S.pose.calibrated = true
   initStars()
   S.mode = 'play'
+  setKeepScreen(true)     // 本局开始：请求屏幕常亮（防自动息屏打断）
   sfxStart()
 }
 
@@ -1164,6 +1355,7 @@ function gameOver() {
   g.dead = true
   g.scoreShow = g.score        // 结算页显示真实分数，别停在缓动途中
   S.mode = 'over'
+  setKeepScreen(false)         // 本局结束：还原系统息屏策略（不在结算页挂着常亮）
   if (g.score > g.best) {
     g.best = Math.round(g.score)
     try { wx.setStorageSync('bd_best', g.best) } catch (e) { /* ignore */ }
@@ -1284,7 +1476,7 @@ function draw(dt, now) {
     ctx.translate(rnd(-m, m), rnd(-m, m))
   }
 
-  // 背景（深空渐变：用两条纯色带模拟，不用真渐变以省性能）
+  // 背景（深林：用两条纯色带模拟，不用真渐变以省性能）
   ctx.fillStyle = C.bg0
   ctx.fillRect(-20, -20, W + 40, H + 40)
   ctx.fillStyle = C.bg1
@@ -1294,19 +1486,19 @@ function draw(dt, now) {
   drawTunnel()
   drawOrbs()      // ★ 隧道之上、飞船之下：块是"管道内的漂浮物"
   drawStreaks()
-  drawShip()
+  drawShip(dt)
   drawParts()     // ★ 粒子压在最上层：吃块的爆散要盖过飞船才醒目
 
   ctx.setTransform(1, 0, 0, 1, 0, 0)
 
   if (g.flash > 0.01) {
-    ctx.fillStyle = 'rgba(255,90,74,' + (g.flash * 0.35) + ')'
+    ctx.fillStyle = 'rgba(226,75,74,' + (g.flash * 0.35) + ')'
     ctx.fillRect(0, 0, W, H)
   }
   // ★ 吃块脉冲：整屏极淡一层青光。刻意不用震屏 —— 震屏是"惩罚"语汇，
   //   而吃块是奖励；奖励用亮度，惩罚用抖动用红，两者不能混。
   if (g.orbFlash > 0.01) {
-    ctx.fillStyle = 'rgba(94,240,216,' + (g.orbFlash * 0.10) + ')'
+    ctx.fillStyle = 'rgba(255,209,102,' + (g.orbFlash * 0.10) + ')'
     ctx.fillRect(0, 0, W, H)
   }
 
@@ -1319,15 +1511,16 @@ function draw(dt, now) {
   }
 }
 
+// 背景星点 → 林间露珠（圆点取代方块，配合昆虫主题）
 function drawStars() {
   const g = S.g
   for (let i = 0; i < g.stars.length; i++) {
     const s = g.stars[i]
-    const r = s.l >= 5 ? 1.8 : (s.l >= 2 ? 1.3 : 0.9)
-    const a = s.l >= 5 ? 0.85 : (s.l >= 2 ? 0.5 : 0.28)
+    const r = s.l >= 5 ? 1.7 : (s.l >= 2 ? 1.2 : 0.8)
+    const a = s.l >= 5 ? 0.80 : (s.l >= 2 ? 0.45 : 0.24)
     ctx.globalAlpha = a
     ctx.fillStyle = C.star
-    ctx.fillRect(s.x * W, s.y * H, r, r)
+    ctx.beginPath(); ctx.arc(s.x * W, s.y * H, r, 0, Math.PI * 2); ctx.fill()
   }
   ctx.globalAlpha = 1
 }
@@ -1353,7 +1546,7 @@ function drawTunnel() {
   const boost = g.boosting
 
   // 地平线
-  ctx.strokeStyle = 'rgba(122,162,255,0.22)'
+  ctx.strokeStyle = 'rgba(111,168,124,0.20)'
   ctx.lineWidth = 1
   ctx.beginPath()
   ctx.moveTo(0, L.horizon)
@@ -1372,11 +1565,11 @@ function drawTunnel() {
         if (i === 0) ctx.moveTo(x, p.y); else ctx.lineTo(x, p.y)
       }
       if (pass === 0) {
-        ctx.strokeStyle = 'rgba(90,140,255,' + (0.20 + hit * 0.55) + ')'
+        ctx.strokeStyle = 'rgba(78,138,94,' + (0.24 + hit * 0.55) + ')'
         ctx.lineWidth = 7
       } else {
-        ctx.strokeStyle = hit > 0.02 ? 'rgba(255,140,120,0.95)'
-          : (boost ? 'rgba(255,225,168,0.90)' : 'rgba(150,200,255,0.78)')
+        ctx.strokeStyle = hit > 0.02 ? 'rgba(255,157,138,0.95)'
+          : (boost ? 'rgba(255,201,138,0.90)' : 'rgba(111,168,124,0.80)')
         ctx.lineWidth = 2
       }
       ctx.stroke()
@@ -1388,7 +1581,7 @@ function drawTunnel() {
     const p = ss[i]
     const zn = clamp(1 - (p.z - CFG.Z_NEAR) / (CFG.Z_FAR - CFG.Z_NEAR), 0, 1)
     ctx.globalAlpha = 0.05 + zn * zn * 0.40
-    ctx.strokeStyle = boost ? '#ffe1a8' : '#8fb8ff'
+    ctx.strokeStyle = boost ? '#FFC98A' : '#6FA87C'
     ctx.lineWidth = zn > 0.72 ? 2 : 1
     ctx.beginPath()
     ctx.moveTo(p.x - p.hw, p.y - p.hh); ctx.lineTo(p.x + p.hw, p.y - p.hh)
@@ -1411,7 +1604,7 @@ function drawStreaks() {
     const len = (0.06 + vis * 0.16) * R
     const ca = Math.cos(k.ang), sa = Math.sin(k.ang)
     ctx.globalAlpha = clamp(0.10 + vis * 0.42, 0, 0.85)
-    ctx.strokeStyle = g.boosting ? '#ffd98a' : C.speed
+    ctx.strokeStyle = g.boosting ? C.boost : C.speed
     ctx.lineWidth = 1.6
     ctx.beginPath()
     ctx.moveTo(cx + ca * r0, cy + sa * r0)
@@ -1422,7 +1615,78 @@ function drawStreaks() {
   ctx.lineCap = 'butt'
 }
 
-function drawShip() {
+// 椭圆路径（4 段 bezier 自绘 —— 不依赖 ctx.ellipse，冒烟桩/低端机都安全）
+function ellPath(cx, cy, rx, ry) {
+  const K = 0.5522847498
+  const ox = rx * K, oy = ry * K
+  ctx.beginPath()
+  ctx.moveTo(cx, cy - ry)
+  ctx.bezierCurveTo(cx + ox, cy - ry, cx + rx, cy - oy, cx + rx, cy)
+  ctx.bezierCurveTo(cx + rx, cy + oy, cx + ox, cy + ry, cx, cy + ry)
+  ctx.bezierCurveTo(cx - ox, cy + ry, cx - rx, cy + oy, cx - rx, cy)
+  ctx.bezierCurveTo(cx - rx, cy - oy, cx - ox, cy - ry, cx, cy - ry)
+  ctx.closePath()
+}
+
+// ★ 翅膀开合量（模块级纯渲染状态，不参与玩法数值）
+//   由**倍率**驱动（见 drawShip）：闭合 1°(0.017) ← 巡航态 → 全展 58°(1.012)
+let wingOpen = 0.017
+const WING_CLOSED = 0.017    // 收翅：仅留一条壳缝（≈1°）
+const WING_FULL = 1.012      // 全展 58°
+
+// ★ 尾迹 2.0（2026-10-10 重做）—— 金色鳞粉喷流
+//   旧版是「三条等宽直线」，太硬、像三根棍子（Eric 真机反馈"太难看"）。
+//   新版三件套：① 分层锥形主尾流（根部宽→尖端收细，透明度递减）
+//              ② 正弦摆动（活物感，不是一根塑料棍）
+//              ③ 程序化鳞粉闪烁点（相位错开 → 持续有新粉冒出）
+//   ★ 全部由 now 驱动、无持久状态 → 冒烟可测、长局不涨内存（与粒子池 P_MAX 同理）。
+function drawTrail(cx, cy, s, now, boosting) {
+  const g = S.g
+  const vis = (g.speed / CFG.SPEED_MAX) * (boosting ? CFG.BOOST_GAIN : 1)
+  const multT = CFG.MULT_ON ? clamp((g.mult - 1) / (CFG.MULT_MAX - 1), 0, 1) : 0
+  const len = s * (1.9 + vis * 3.0) * (0.90 + multT * 0.45)   // 充能越满 → 尾迹越长
+  const y0 = cy + s * 0.58
+  const col = boosting ? C.boost : C.trail
+  const STEPS = 7
+
+  // ① 主尾流：3 层锥形叠加（外层长而淡 → 内层短而浓）
+  const LAYERS = [[1.00, 0.34, 0.26], [0.68, 0.22, 0.22], [0.38, 0.12, 0.18]]
+  for (let li = 0; li < LAYERS.length; li++) {
+    const hw0 = s * LAYERS[li][1]
+    const lenL = len * LAYERS[li][0]
+    ctx.globalAlpha = LAYERS[li][2]
+    ctx.fillStyle = col
+    ctx.beginPath()
+    ctx.moveTo(cx - hw0, y0)
+    for (let i = 1; i <= STEPS; i++) {            // 右半边
+      const t = i / STEPS
+      const hw = hw0 * (1 - t) * (1 - t)          // 平方收细 → 火焰感
+      const sw = Math.sin(now / 110 + t * 3.4 + li * 2.1) * s * 0.11 * t
+      ctx.lineTo(cx + hw + sw, y0 + lenL * t)
+    }
+    for (let i = STEPS; i >= 1; i--) {            // 左半边（回到根部）
+      const t = i / STEPS
+      const hw = hw0 * (1 - t) * (1 - t)
+      const sw = Math.sin(now / 110 + t * 3.4 + li * 2.1) * s * 0.11 * t
+      ctx.lineTo(cx - hw + sw, y0 + lenL * t)
+    }
+    ctx.closePath()
+    ctx.fill()
+  }
+  // ② 鳞粉闪烁点
+  const MOTES = 6
+  for (let i = 0; i < MOTES; i++) {
+    const t = (now / 620 + i / MOTES) % 1
+    const ox = Math.sin(now / 170 + i * 2.7) * (s * 0.40 * t)
+    const r = Math.max(0.6, s * 0.06 * (1 - t))
+    ctx.globalAlpha = (1 - t) * (0.50 + vis * 0.28)
+    ctx.fillStyle = C.trail
+    ctx.beginPath(); ctx.arc(cx + ox, y0 + len * t, r, 0, Math.PI * 2); ctx.fill()
+  }
+  ctx.globalAlpha = 1
+}
+
+function drawShip(dt) {
   const g = S.g
   const p = project(g.wx, CFG.SHIP_Z)
   const s = clamp(Math.min(W, H) * 0.045, 14, 34)
@@ -1430,57 +1694,204 @@ function drawShip() {
   const invuln = now < g.invulnUntil
   const blink = invuln && (Math.floor(now / 110) % 2 === 0)
 
-  // 尾迹（长度 ∝ 速度，Boost 时加长爆亮）
-  const vis = (g.speed / CFG.SPEED_MAX) * (g.boosting ? CFG.BOOST_GAIN : 1)
-  const tl = s * (1.6 + vis * 3.2)
-  ctx.globalAlpha = 0.85
-  ctx.strokeStyle = g.boosting ? '#ffe1a8' : C.trail
-  ctx.lineWidth = s * 0.28
-  ctx.lineCap = 'round'
-  ctx.beginPath(); ctx.moveTo(p.x - s * 0.30, p.y + s * 0.55); ctx.lineTo(p.x - s * 0.30, p.y + s * 0.55 + tl); ctx.stroke()
-  ctx.beginPath(); ctx.moveTo(p.x + s * 0.30, p.y + s * 0.55); ctx.lineTo(p.x + s * 0.30, p.y + s * 0.55 + tl); ctx.stroke()
-  ctx.beginPath(); ctx.moveTo(p.x, p.y + s * 0.60); ctx.lineTo(p.x, p.y + s * 0.60 + tl * 1.25); ctx.stroke()
-  ctx.globalAlpha = 1
-  ctx.lineCap = 'butt'
+  // ---- 翅膀开合：由**倍率**驱动（2026-10-10 Eric 真机反馈后改）----
+  //   ★ 改版理由：上一版常态就张 14°、只有 Boost 才全张 → 玩家"没看到它展开翅膀"。
+  //   新版：平时巡航 = 鞘翅**闭合**（收翅飞）；贴中线攒倍率 ≥ WING_OPEN_MULT 后随充能
+  //   逐渐张开；满倍率 = 全展 58°。Boost 只做**叠加**（再猛张一点），不夺走倍率的表达权。
+  const wingT = CFG.MULT_ON
+    ? clamp((g.mult - CFG.WING_OPEN_MULT) / (CFG.MULT_MAX - CFG.WING_OPEN_MULT), 0, 1)
+    : 0
+  const openTgt = WING_CLOSED + wingT * (WING_FULL - WING_CLOSED) + (g.boosting ? 0.18 : 0)
+  const openStep = (openTgt > wingOpen ? 1 / 0.22 : 1 / 0.45) * (dt || 0.016)  // 展开快 / 收回慢
+  wingOpen += clamp(openTgt - wingOpen, -openStep, openStep)
+
+  // 尾迹：金色鳞粉喷流（见 drawTrail）
+  drawTrail(p.x, p.y, s, now, g.boosting)
+
+
+  // ★ v7 倍率光球 —— 让「保持居中」这件事第一次**可见**。
+  //   半径 / 亮度 / 颜色 ∝ 倍率，满档金光 = 成就信号。这是"居中连乘"唯一的可视载体，
+  //   没有它玩家只会看到一个凭空变大的分数（验证阶段先做简单标记，特效样式后置）。
+  if (CFG.MULT_ON && g.mult > 1.02) {
+    const t01 = clamp((g.mult - 1) / (CFG.MULT_MAX - 1), 0, 1)
+    const cy = p.y - s * 0.10
+    const rr = s * (1.30 + t01 * 1.30) * (1 + g.multPop * 0.30)
+    ctx.strokeStyle = multColor(g.mult)
+    ctx.globalAlpha = 0.20 + t01 * 0.55
+    ctx.lineWidth = s * (0.09 + t01 * 0.13)
+    ctx.beginPath(); ctx.arc(p.x, cy, rr, 0, Math.PI * 2); ctx.stroke()
+    ctx.globalAlpha = 0.08 + t01 * 0.24
+    ctx.lineWidth = s * (0.24 + t01 * 0.30)
+    ctx.beginPath(); ctx.arc(p.x, cy, rr * 0.80, 0, Math.PI * 2); ctx.stroke()
+    ctx.globalAlpha = 1
+  }
+  // ★ v7 破倍率：光环碎散（红色扩散环）—— "啊，攒的倍率没了"
+  if (g.multLost > 0) {
+    const cy = p.y - s * 0.10
+    ctx.strokeStyle = C.bad
+    ctx.globalAlpha = g.multLost * 0.65
+    ctx.lineWidth = s * 0.18 * g.multLost
+    ctx.beginPath(); ctx.arc(p.x, cy, s * (1.6 + (1 - g.multLost) * 2.4), 0, Math.PI * 2); ctx.stroke()
+    ctx.globalAlpha = 1
+  }
+
+  // ★ 充能光晕：与**翅膀张开同步**出现（Eric："翅膀展开，同时有光晕"）。
+  //   刻意用暖金（C.boost）—— 与倍率环的冷青区分：冷环 = 精准度读数，暖晕 = 能量充盈感。
+  //   同心圆叠加，不用 shadowBlur（Canvas 上极贵）。
+  if (wingT > 0.01 && !blink) {
+    const gy = p.y - s * 0.05
+    const pulse = 1 + Math.sin(now / 320) * 0.06 + g.multPop * 0.35
+    ctx.fillStyle = C.boost
+    ctx.globalAlpha = wingT * (0.10 + g.multPop * 0.16)
+    ctx.beginPath(); ctx.arc(p.x, gy, s * 2.15 * pulse, 0, Math.PI * 2); ctx.fill()
+    ctx.globalAlpha = wingT * (0.14 + g.multPop * 0.20)
+    ctx.beginPath(); ctx.arc(p.x, gy, s * 1.35 * pulse, 0, Math.PI * 2); ctx.fill()
+    ctx.globalAlpha = 1
+  }
 
   if (blink) return
 
   ctx.save()
   ctx.translate(p.x, p.y)
-  ctx.rotate(g.tilt)
+  ctx.rotate(g.tilt)          // 转向侧倾：把 roll 输入可视化（"看得见自己脖子转了多少"）
 
-  // 机身
-  ctx.fillStyle = C.ship
-  ctx.beginPath()
-  ctx.moveTo(0, -s * 1.15)
-  ctx.lineTo(s * 0.80, s * 0.75)
-  ctx.lineTo(0, s * 0.35)
-  ctx.lineTo(-s * 0.80, s * 0.75)
-  ctx.closePath()
-  ctx.fill()
+  // ---- ① 膜翅（后翅）：半透明薄膜，才是真动力（仅在鞘翅张开后可见）----
+  // ★ "急扇"不能按真实频率画：真甲虫 20~40Hz，60fps 每帧不到半周期 → 只会采样混叠成闪烁。
+  //   正解 = 低频真实摆动；Boost 同时画 3 个不同角度的低透明膜翅叠加（残影暗示高频）。
+  const wf = clamp((wingOpen - WING_CLOSED) / (WING_FULL - WING_CLOSED), 0, 1)  // 0 闭合 → 1 全展
+  if (wf > 0.02) {
+    const fan = Math.sin(now / 1000 * Math.PI * 2 * 3.4) * 0.28
+    for (let side = -1; side <= 1; side += 2) {
+      const span = side * (0.52 + wingOpen * 0.62)
+      const ghosts = g.boosting ? [0, 0.20, 0.38] : [0]
+      for (let gi = 0; gi < ghosts.length; gi++) {
+        ctx.save()
+        ctx.translate(side * s * 0.12, -s * 0.40)
+        ctx.rotate(span + side * ghosts[gi] + (gi === 0 ? side * fan : 0))
+        ctx.globalAlpha = ((gi === 0 ? 0.22 : (gi === 1 ? 0.10 : 0.06)) + (g.boosting ? 0.04 : 0)) * wf
+        ctx.fillStyle = C.wing
+        ellPath(0, s * 0.66, s * 0.24, s * 0.72)
+        ctx.fill()
+        ctx.restore()
+      }
+    }
+    ctx.globalAlpha = 1
+  }
 
-  ctx.fillStyle = C.shipDark
-  ctx.beginPath()
-  ctx.moveTo(0, -s * 0.55)
-  ctx.lineTo(s * 0.34, s * 0.50)
-  ctx.lineTo(0, s * 0.30)
-  ctx.lineTo(-s * 0.34, s * 0.50)
-  ctx.closePath()
-  ctx.fill()
-
-  // 座舱
-  ctx.fillStyle = C.shipLite
-  ctx.beginPath()
-  ctx.arc(0, -s * 0.28, s * 0.22, 0, Math.PI * 2)
-  ctx.fill()
-
-  // Boost 光晕
-  if (g.boosting) {
-    ctx.globalAlpha = 0.5
-    ctx.fillStyle = '#ffd98a'
+  // ---- ② 六足：飞行时收拢贴体（更写实，也更省绘制）----
+  //   画在鞘翅之下，只露出足尖 —— 真甲虫飞行时六足就是这样收着的。
+  ctx.strokeStyle = C.leg
+  ctx.lineWidth = Math.max(1, s * 0.06)
+  ctx.lineCap = 'round'
+  const legs = [[-0.50, -0.18, -0.86, -0.06], [0.50, -0.18, 0.86, -0.06],
+                [-0.56, 0.30, -0.92, 0.46], [0.56, 0.30, 0.92, 0.46],
+                [-0.46, 0.82, -0.72, 1.02], [0.46, 0.82, 0.72, 1.02]]
+  for (let i = 0; i < legs.length; i++) {
+    const q = legs[i]
     ctx.beginPath()
-    ctx.arc(0, s * 0.9, s * 0.9, 0, Math.PI * 2)
+    ctx.moveTo(q[0] * s, q[1] * s)
+    ctx.lineTo(q[2] * s, q[3] * s)
+    ctx.stroke()
+  }
+  ctx.lineCap = 'butt'
+
+  // ---- ③ 鞘翅（前翅）：不透明硬壳，飞行时上张 ----
+  //   ★ 绕"肩部铰链"转（非自身中心）—— 真动作是三维的，2D 俯视用"绕肩旋转=开壳"作视觉约定。
+  for (let side = -1; side <= 1; side += 2) {
+    ctx.save()
+    ctx.translate(side * s * 0.12, -s * 0.40)      // 肩部铰链
+    ctx.rotate(side * wingOpen)                    // 开壳
+    ellPath(side * s * 0.30, s * 0.62, s * 0.58, s * 0.94)
+    ctx.fillStyle = C.ship
     ctx.fill()
+    // ★ 轮廓光：1px 冷白描边 —— 把绿虫从绿底上撕开（写实分离的必做项，成本极低效果最直接）
+    ctx.globalAlpha = 0.58
+    ctx.strokeStyle = C.rim
+    ctx.lineWidth = 1
+    ctx.stroke()
+    // 壳面高光：光源正上方偏左 15° → 窄条实色（不用模糊）
+    ctx.globalAlpha = 0.50
+    ctx.strokeStyle = C.shipLite
+    ctx.lineWidth = Math.max(1, s * 0.10)
+    ctx.lineCap = 'round'
+    ctx.beginPath()
+    ctx.moveTo(side * s * 0.08, 0)
+    ctx.lineTo(side * s * 0.26, s * 0.66)
+    ctx.stroke()
+    ctx.lineCap = 'butt'
+    ctx.globalAlpha = 1
+    ctx.restore()
+  }
+
+  // ---- ④ 鞘翅中缝：天然对称轴（与"贴中线"同构，可当对准辅助线）----
+  if (wingOpen < 0.55) {
+    ctx.strokeStyle = C.shipDark
+    ctx.globalAlpha = clamp(1 - wingOpen / 0.55, 0, 1) * 0.9
+    ctx.lineWidth = Math.max(1, s * 0.06)
+    ctx.beginPath()
+    ctx.moveTo(0, -s * 0.32)
+    ctx.lineTo(0, s * 1.04)
+    ctx.stroke()
+    ctx.globalAlpha = 1
+  }
+
+  // ---- ⑤ 腹部（Boost 张开后露出 + 节纹）----
+  if (wingOpen > 0.60) {
+    ctx.globalAlpha = clamp((wingOpen - 0.60) / 0.41, 0, 1)
+    ctx.fillStyle = C.shipDark
+    ellPath(0, s * 0.56, s * 0.40, s * 0.54)
+    ctx.fill()
+    ctx.strokeStyle = C.leg
+    ctx.lineWidth = 1
+    for (let k = 0; k < 3; k++) {
+      const yy = s * (0.38 + k * 0.20)
+      ctx.beginPath(); ctx.moveTo(-s * 0.32, yy); ctx.lineTo(s * 0.32, yy); ctx.stroke()
+    }
+    ctx.globalAlpha = 1
+  }
+
+  // ---- ⑥ 前胸背板（pronotum）----
+  ctx.fillStyle = C.pronotum
+  ctx.beginPath()
+  ctx.moveTo(-s * 0.50, -s * 0.40)
+  ctx.lineTo(-s * 0.32, -s * 0.90)
+  ctx.lineTo(s * 0.32, -s * 0.90)
+  ctx.lineTo(s * 0.50, -s * 0.40)
+  ctx.closePath()
+  ctx.fill()
+  ctx.globalAlpha = 0.5
+  ctx.strokeStyle = C.rim
+  ctx.lineWidth = 1
+  ctx.stroke()
+  ctx.globalAlpha = 1
+
+  // ---- ⑦ 头部 + 鳃叶触角（金龟子科的标志：小尺寸靠"椭圆身+中缝+触角"认虫）----
+  ctx.fillStyle = C.headC
+  ellPath(0, -s * 0.92, s * 0.30, s * 0.24)
+  ctx.fill()
+  const asway = Math.sin(now / 620) * s * 0.06   // ★ 触角微摆：收翅巡航时也"是活的"，不是一张贴纸
+  for (let side = -1; side <= 1; side += 2) {
+    ctx.strokeStyle = C.antenna
+    ctx.lineWidth = Math.max(1, s * 0.06)
+    ctx.beginPath()
+    ctx.moveTo(side * s * 0.20, -s * 1.00)
+    ctx.lineTo(side * s * 0.56, -s * 1.30 + asway)
+    ctx.stroke()
+    // 鳃叶：末端 3 片小叶扇形排开
+    ctx.fillStyle = C.antenna
+    for (let k = -1; k <= 1; k++) {
+      ellPath(side * s * (0.58 + k * 0.05), -s * (1.34 + Math.abs(k) * 0.06) + asway, s * 0.085, s * 0.13)
+      ctx.fill()
+    }
+  }
+
+  // Boost 光晕（尾部）：同心圆叠加，不用 shadowBlur
+  if (g.boosting) {
+    ctx.fillStyle = C.boost
+    ctx.globalAlpha = 0.15
+    ctx.beginPath(); ctx.arc(0, s * 1.0, s * 1.05, 0, Math.PI * 2); ctx.fill()
+    ctx.globalAlpha = 0.22
+    ctx.beginPath(); ctx.arc(0, s * 1.0, s * 0.70, 0, Math.PI * 2); ctx.fill()
     ctx.globalAlpha = 1
   }
   ctx.restore()
@@ -1506,25 +1917,22 @@ function drawOrbs() {
     const a = clamp(0.32 + (1 - (zr - 4.5) / (CFG.Z_FAR - 4.5)) * 0.68, 0.32, 1)
     const pulse = 0.84 + 0.16 * Math.sin(now / 210 + o.spin)
 
-    ctx.globalAlpha = a * 0.32
+    // 光晕：同心圆叠加（禁 shadowBlur —— Canvas 上极贵，低端机会掉帧）
+    ctx.globalAlpha = a * 0.30
     ctx.fillStyle = C.orbGlow
     ctx.beginPath(); ctx.arc(c.x, c.y, R * 2.3 * pulse, 0, Math.PI * 2); ctx.fill()
 
     ctx.globalAlpha = a
-    ctx.save()
-    ctx.translate(c.x, c.y)
-    ctx.rotate(o.spin)
+    // 花粉球体
     ctx.fillStyle = C.orb
-    ctx.beginPath()
-    ctx.moveTo(0, -R * 1.15)
-    ctx.lineTo(R * 0.68, 0)
-    ctx.lineTo(0, R * 1.15)
-    ctx.lineTo(-R * 0.68, 0)
-    ctx.closePath()
-    ctx.fill()
+    ctx.beginPath(); ctx.arc(c.x, c.y, R * 1.05, 0, Math.PI * 2); ctx.fill()
+    // 亮核
     ctx.fillStyle = C.orbCore
-    ctx.beginPath(); ctx.arc(0, 0, Math.max(0.8, R * 0.34), 0, Math.PI * 2); ctx.fill()
-    ctx.restore()
+    ctx.beginPath(); ctx.arc(c.x, c.y, Math.max(0.8, R * 0.42), 0, Math.PI * 2); ctx.fill()
+    // 花粉粒质感：左上一个淡凹点
+    ctx.globalAlpha = a * 0.35
+    ctx.fillStyle = C.orbGlow
+    ctx.beginPath(); ctx.arc(c.x - R * 0.30, c.y + R * 0.30, Math.max(0.5, R * 0.24), 0, Math.PI * 2); ctx.fill()
   }
   ctx.globalAlpha = 1
 }
@@ -1558,7 +1966,9 @@ function drawComboPop() {
   ctx.globalAlpha = alpha
   ctx.translate(W / 2, H * 0.26)
   ctx.scale(scale, scale)
-  ctx.fillStyle = C.orb
+  // ★ v7 弹出文字的"来源色"：被高倍率放大的块 → 金色（"这分是攒倍率挣来的"），
+  //   让玩家把「攒倍率」和「吃块得分」在因果上连起来，而不是两个孤立的数字。
+  ctx.fillStyle = g.comboPopMul > 1.5 ? C.orbCore : C.orb
   ctx.font = 'bold ' + Math.round(u * 0.052) + 'px sans-serif'
   ctx.fillText(g.comboPopTxt, 0, 0)
   ctx.restore()
@@ -1572,7 +1982,7 @@ function inRect(r, x, y) {
 
 // 暂停图标：两条竖杠（手绘，不依赖字体里有没有 ⏸）
 function drawPauseIcon(x, y, w, h) {
-  ctx.fillStyle = 'rgba(15,22,48,0.85)'
+  ctx.fillStyle = 'rgba(14,26,18,0.85)'
   ctx.fillRect(x, y, w, h)
   ctx.strokeStyle = C.line; ctx.lineWidth = 1
   ctx.strokeRect(x, y, w, h)
@@ -1589,7 +1999,7 @@ function drawPaused() {
   const cx = W / 2
   const u = Math.min(W, H)
   ctx.textAlign = 'center'
-  ctx.fillStyle = 'rgba(5,7,15,0.86)'
+  ctx.fillStyle = 'rgba(8,18,12,0.88)'
   ctx.fillRect(0, 0, W, H)
 
   ctx.fillStyle = C.accent
@@ -1610,7 +2020,7 @@ function drawPaused() {
   ctx.fillStyle = C.ok
   ctx.fillText('颈椎活动 ' + nk.activity + ' 次 · 左 ' + nk.left + ' 右 ' + nk.right + ' · 平衡 ' + bal + '%', cx, H * 0.415)
   ctx.fillStyle = C.orb
-  ctx.fillText('能量块 ' + g.took + ' 个 · 平均离中线 ' + off + '%', cx, H * 0.455)
+  ctx.fillText('花粉球 ' + g.took + ' 个 · 平均离中线 ' + off + '%', cx, H * 0.455)
   ctx.fillStyle = C.dim
   ctx.fillText('蹭壁 ' + g.hits + ' 次 · 平均居中 ' + cen + '%', cx, H * 0.495)
 
@@ -1624,7 +2034,7 @@ function drawPaused() {
   ]
   for (let i = 0; i < S.btn.pui.length; i++) {
     const b = S.btn.pui[i]
-    ctx.fillStyle = 'rgba(15,22,48,0.92)'
+    ctx.fillStyle = 'rgba(14,26,18,0.92)'
     ctx.fillRect(b.x, b.y, b.w, b.h)
     ctx.strokeStyle = b.col; ctx.lineWidth = 1.5
     ctx.strokeRect(b.x, b.y, b.w, b.h)
@@ -1636,10 +2046,14 @@ function drawPaused() {
   const swY = by + bh + u * 0.055
   ctx.fillStyle = CFG.AUDIO_ON ? C.ok : C.dim
   ctx.font = Math.round(u * 0.028) + 'px sans-serif'
-  ctx.fillText('音效:' + (CFG.AUDIO_ON ? '开' : '关') + (S.audio === 'off' ? '（本机不支持）' : ''), cx, swY)
+  // 诊断：创建失败时把原因带出来（"接口缺失"/"创建失败"），方便真机上定位
+  const aTxt = CFG.AUDIO_ON
+    ? ('音效:开' + (S.audio === 'off' ? '（不可用·' + (audioWhy || '未知') + '）' : ''))
+    : '音效:关'
+  ctx.fillText(aTxt, cx, swY)
   S.btn.aSW = { x: cx - u * 0.17, y: swY - u * 0.034, w: u * 0.34, h: u * 0.058 }
 
-  ctx.fillStyle = 'rgba(127,143,196,0.65)'
+  ctx.fillStyle = 'rgba(127,154,134,0.65)'
   ctx.font = Math.round(u * 0.024) + 'px sans-serif'
   ctx.fillText('随时可以歇一歇 —— 脖子放松一下', cx, H * 0.89)
   ctx.textAlign = 'left'
@@ -1657,7 +2071,7 @@ function drawHud(now) {
   const fsBig = Math.max(16, Math.round(fs * 1.5))
 
   // 顶部条
-  ctx.fillStyle = 'rgba(5,7,15,0.55)'
+  ctx.fillStyle = 'rgba(8,18,12,0.58)'
   ctx.fillRect(0, 0, W, L.top + fs * 1.2)
 
   ctx.textAlign = 'left'
@@ -1700,13 +2114,21 @@ function drawHud(now) {
   const bal = nk.left + nk.right > 0
     ? Math.round(Math.min(nk.left, nk.right) / Math.max(1, Math.max(nk.left, nk.right)) * 100)
     : 100
-  ctx.fillText('脖动 ' + nk.activity + ' · 平衡 ' + bal + '% · 居中 ' + Math.round(g.cent * 100) + '%', pad, L.top + fs * 1.5)
+  const line2 = '脖动 ' + nk.activity + ' · 平衡 ' + bal + '%'
+  ctx.fillText(line2, pad, L.top + fs * 1.5)
+  // ★ v7 倍率：代替原来的「居中 XX%」—— 倍率是居中的**结果量**，玩家关心结果，不关心中间量
+  if (CFG.MULT_ON && g.mult > 1.02) {
+    const w2 = ctx.measureText(line2).width
+    ctx.fillStyle = multColor(g.mult)
+    ctx.font = 'bold ' + fs + 'px sans-serif'
+    ctx.fillText('  · 倍率 ×' + g.mult.toFixed(1), pad + w2, L.top + fs * 1.5)
+  }
 
   // 速度条（顶部右侧）
   const bw = W * 0.30
   const bx = W - pad - bw
   const by = L.top + fs * 0.9
-  ctx.fillStyle = 'rgba(36,48,96,0.9)'
+  ctx.fillStyle = 'rgba(34,64,44,0.9)'
   ctx.fillRect(bx, by, bw, 6)
   const sr = clamp((g.speed - CFG.SPEED_MIN) / (CFG.SPEED_MAX - CFG.SPEED_MIN), 0, 1)
   ctx.fillStyle = g.boosting ? C.warn : C.accent
@@ -1721,7 +2143,7 @@ function drawHud(now) {
   // 左上角：调试读数（帧率 / 姿态）—— 真机调参要看
   ctx.textAlign = 'left'
   ctx.font = Math.max(9, Math.round(fs * 0.78)) + 'px sans-serif'
-  ctx.fillStyle = 'rgba(127,143,196,0.9)'
+  ctx.fillStyle = 'rgba(127,154,134,0.9)'
   const p = S.pose
   const dbg = '渲染' + S.perf.renderFps + '/s · 取帧' + S.fr.fps + '/s · 检' + S.det.fps + '/s'
   ctx.fillText(dbg, pad, H - L.pad - fs * 0.1)
@@ -1746,11 +2168,11 @@ function drawHud(now) {
     ctx.fillText('相机', cr.x + cr.w / 2, cr.y - 3)
     ctx.textAlign = 'left'
   } else {
-    ctx.fillStyle = 'rgba(122,162,255,0.35)'
+    ctx.fillStyle = 'rgba(127,217,138,0.35)'
     ctx.beginPath()
     ctx.arc(W - L.pad - 6, H - L.pad - 30, 3, 0, Math.PI * 2)
     ctx.fill()
-    ctx.fillStyle = 'rgba(127,143,196,0.55)'
+    ctx.fillStyle = 'rgba(127,154,134,0.55)'
     ctx.font = Math.max(8, fs * 0.7) + 'px sans-serif'
     ctx.textAlign = 'right'
     ctx.fillText('传感器·本机处理', W - L.pad, H - L.pad - 36)
@@ -1775,7 +2197,7 @@ function drawHud(now) {
   for (let i = 0; i < labels.length; i++) {
     const b = labels[i]
     const x = S.btn.xs[b.i]
-    ctx.fillStyle = 'rgba(15,22,48,0.85)'
+    ctx.fillStyle = 'rgba(14,26,18,0.85)'
     ctx.fillRect(x, btnY, bwid, bh)
     ctx.strokeStyle = C.line
     ctx.lineWidth = 1
@@ -1811,14 +2233,14 @@ function saveRange() { try { wx.setStorageSync('bd_range', S.rangeIdx) } catch (
 function drawBoot() {
   const cx = W / 2
   ctx.textAlign = 'center'
-  ctx.fillStyle = 'rgba(5,7,15,0.72)'
+  ctx.fillStyle = 'rgba(8,18,12,0.75)'
   ctx.fillRect(0, 0, W, H)
   ctx.fillStyle = C.accent
   ctx.font = 'bold ' + Math.round(Math.min(W, H) * 0.075) + 'px sans-serif'
   ctx.fillText('脖动圈', cx, H * 0.40)
   ctx.fillStyle = C.fg
   ctx.font = Math.round(Math.min(W, H) * 0.036) + 'px sans-serif'
-  ctx.fillText('歪头即转向 · 穿越隧道', cx, H * 0.46)
+  ctx.fillText('歪头即转向 · 穿越草茎', cx, H * 0.46)
 
   ctx.fillStyle = C.dim
   ctx.font = Math.round(Math.min(W, H) * 0.030) + 'px sans-serif'
@@ -1826,14 +2248,17 @@ function drawBoot() {
   if (!S.hasCam || !S.hasVK) tip = '摄像头不可用 · 点屏幕用触摸开始'
   ctx.fillText(tip, cx, H * 0.56)
   ctx.fillText('坐直、手机立起来，正对屏幕', cx, H * 0.60)
-  ctx.fillText('头向左右肩歪 → 飞船左右移动', cx, H * 0.645)
+  ctx.fillText('头向左右肩歪 → 金龟子左右移动', cx, H * 0.645)
+  // ★ v7 玩法引导：把「居中 = 攒倍率」这条新规则讲清楚（旧文案"贴中线没分"已失效）
+  ctx.fillStyle = '#DCFAF0'
+  ctx.fillText('贴中线稳住 → 攒倍率（最高 ×5）', cx, H * 0.685)
   ctx.fillStyle = C.orb
-  ctx.fillText('去够青色能量块 · 贴中线能保命但没分', cx, H * 0.685)
+  ctx.fillText('去够金色花粉球 · 得分被倍率放大', cx, H * 0.72)
 
   if (S.err) {
     ctx.fillStyle = C.bad
     ctx.font = Math.round(Math.min(W, H) * 0.026) + 'px sans-serif'
-    ctx.fillText(S.err.slice(0, 40), cx, H * 0.735)
+    ctx.fillText(S.err.slice(0, 40), cx, H * 0.765)
   }
   ctx.textAlign = 'left'
 }
@@ -1843,7 +2268,7 @@ function drawOver() {
   const g = S.g
   const u = Math.min(W, H)
   ctx.textAlign = 'center'
-  ctx.fillStyle = 'rgba(5,7,15,0.78)'
+  ctx.fillStyle = 'rgba(8,18,12,0.80)'
   ctx.fillRect(0, 0, W, H)
 
   // 主动收工 ≠ 撞光血量：文案和颜色都要分开，否则"想歇了就停"会被当成失败
@@ -1871,15 +2296,21 @@ function drawOver() {
   // ★ 这一行是本版存在的理由：把"你到底把脖子动了多远"量化出来
   const off = g.offN > 0 ? Math.round(g.offSum / g.offN * 100) : 0
   ctx.fillStyle = C.orb
-  ctx.fillText('能量块 ' + g.took + ' 个 · 平均离中线 ' + off + '%', cx, H * 0.614)
+  ctx.fillText('花粉球 ' + g.took + ' 个 · 平均离中线 ' + off + '%', cx, H * 0.614)
 
   const cen = g.centN > 0 ? Math.round(g.centSum / g.centN * 100) : 100
   ctx.fillStyle = C.warn
   ctx.fillText('蹭壁 ' + g.hits + ' 次 · 平均居中 ' + cen + '%', cx, H * 0.656)
 
+  // ★ v7 居中连乘：最高倍率 = "你稳住了多久"的量化证明（避免倍率只是局内的瞬时感受）
+  if (CFG.MULT_ON && g.multBest > 1.05) {
+    ctx.fillStyle = multColor(g.multBest)
+    ctx.fillText('最高倍率 ×' + g.multBest.toFixed(1), cx, H * 0.698)
+  }
+
   ctx.fillStyle = C.accent
   ctx.font = Math.round(u * 0.036) + 'px sans-serif'
-  ctx.fillText('点屏幕再来一局', cx, H * 0.74)
+  ctx.fillText('点屏幕再来一局', cx, H * 0.755)
   ctx.textAlign = 'left'
 }
 
@@ -1895,8 +2326,9 @@ function toggleAudio() {
   CFG.AUDIO_ON = !CFG.AUDIO_ON
   try { wx.setStorageSync('bd_audio', CFG.AUDIO_ON ? 1 : 0) } catch (e) { /* ignore */ }
   if (CFG.AUDIO_ON) {
-    if (AC === false) { AC = null; initAudio() }   // 之前创建失败过 → 重试一次
-    tone(660, 0.10, 'triangle', 0.14)              // 立刻给个确认音，否则用户不知道开没开
+    if (AC === false) { AC = null; unlocked = false }  // 之前创建失败过 → 重置后重试
+    unlockAudio()                                      // ★ 在手势内激活（用户点了开关）
+    tone(660, 0.10, 'triangle', 0.14)                  // 立刻给个确认音，否则用户不知道开没开
   }
 }
 
@@ -1907,7 +2339,7 @@ wx.onTouchStart(function (e) {
   const tx = t.clientX, ty = t.clientY
 
   // ★ iOS 上 WebAudio 必须由用户手势唤醒 → 每次触摸补一次 resume（幂等）
-  initAudio()
+  unlockAudio()
 
   // ① 暂停层：吃掉全部输入，避免误触底下的按钮
   if (S.mode === 'paused') {
@@ -1932,7 +2364,7 @@ wx.onTouchStart(function (e) {
       return
     }
     if (bi === 1) {
-      // 切换「幅度」档：紧凑(20°) → 标准(30°) → 舒展(40°)
+      // 切换「幅度」档：紧凑(20°) → 标准(25°) → 舒展(36°)
       S.rangeIdx = (S.rangeIdx + 1) % RANGES.length
       saveRange()
       resetCtl()
@@ -1969,6 +2401,13 @@ wx.onTouchMove(function (e) {
 
 wx.onTouchEnd(function () { touch.down = false })
 wx.onTouchCancel(function () { touch.down = false })
+
+// ★ 屏幕常亮：退到后台就还原；回前台若仍在本局（play/paused）再补一次
+//   —— 系统切后台时可能重置该项，不补会出现"玩到一半又开始变暗"。
+if (wx.onHide) wx.onHide(function () { setKeepScreen(false) })
+if (wx.onShow) wx.onShow(function () {
+  if (S.mode === 'play' || S.mode === 'paused') setKeepScreen(true)
+})
 
 // ---------------------------------------------------------------- 启动
 function boot() {
